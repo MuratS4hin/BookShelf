@@ -1,0 +1,67 @@
+# macOS
+.DS_Store
+
+# Node
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+package-lock.json
+.env
+.env.*
+
+# React Native
+*.expo
+.expo/
+.expo-shared/
+*.swp
+
+# Metro bundler cache
+.cache/
+__generated__/
+
+# iOS
+ios/Pods/
+ios/Podfile.lock
+ios/build/
+ios/DerivedData/
+*.xcodeproj/project.xcworkspace/
+*.xcuserdata
+*.xcuserstate
+*.xcuserdatad
+ios/*.pbxuser
+
+# Android
+android/.gradle/
+android/app/build/
+android/build/
+android/local.properties
+android/.idea/
+*.iml
+.gradle/
+
+# VSCode
+.vscode/
+
+# Test & coverage
+coverage/
+jest-cache/
+*.test.js.snap
+*.test.ts.snap
+*.test.tsx.snap
+
+# Fastlane
+fastlane/report.xml
+fastlane/Preview.html
+fastlane/screenshots/
+
+# Bundled assets
+*.tar.gz
+*.tgz
+*.zip
+*.apk
+*.ipa
+
+# Misc
+*.log
+*.tmp
