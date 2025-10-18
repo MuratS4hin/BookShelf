@@ -12,9 +12,9 @@ const BottomNavBar = ({ navigation, currentRouteName }) => {
 
   // Sekme verileri
   const tabs = [
-    { name: 'HomeStack', icon: 'home', route: 'Home', iconLib: MaterialIcons },
-    { name: 'LibraryStack', icon: 'book', route: 'Library', iconLib: MaterialIcons },
-    { name: 'SettingsStack', icon: 'settings', route: 'Settings', iconLib: MaterialIcons },
+    { name:'Home', nameStack: 'HomeStack', icon: 'home', route: 'HomeStack', iconLib: MaterialIcons },
+    { name:'Library', nameStack: 'LibraryStack', icon: 'book', route: 'LibraryStack', iconLib: MaterialIcons },
+     { name:'Settings', nameStack: 'SettingsStack', icon: 'settings', route: 'SettingsStack', iconLib: MaterialIcons },
   ];
 
   const styles = StyleSheet.create({
@@ -45,7 +45,7 @@ const BottomNavBar = ({ navigation, currentRouteName }) => {
     <View style={styles.footer}>
       <View style={styles.navBar}>
         {tabs.map((tab) => {
-          const isActive = currentRouteName === tab.name;
+          const isActive = currentRouteName === tab.nameStack;
           const iconColor = isActive ? styles.activeColor : styles.inactiveColor;
           const IconComponent = tab.iconLib;
 

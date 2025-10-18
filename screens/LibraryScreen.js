@@ -1,155 +1,227 @@
-// screens/LibraryScreen.js
+import React, { useState } from 'react';
+import { View, Text, TouchableOpacity, ScrollView, Image, SafeAreaView, StyleSheet, useColorScheme, ActivityIndicator, Alert } from 'react-native';
+import { MaterialIcons } from '@expo/vector-icons';
+import * as DocumentPicker from 'expo-document-picker'; 
+import * as FileSystem from 'expo-file-system';
+import axios from 'axios';
+import useAppStore from '../store/UseAppStore'; 
 
-import React from 'react';
-import { View, Text, TouchableOpacity, ScrollView, TextInput, Image, SafeAreaView, StyleSheet, useColorScheme } from 'react-native';
-import { Feather } from '@expo/vector-icons';
 import { Colors, getThemeStyles } from '../utils/ThemeStyles';
 import BottomTabBar from '../navigation/BottomNavBar';
 
+const SERVER_IP = '192.168.1.30';
+const SERVER_PORT = '5002';
+const ENDPOINT = '/generate-audiobook/';
+const SERVER_URL = `http://${SERVER_IP}:${SERVER_PORT}${ENDPOINT}`;
+
+// Varsayılan konuşma hızı (Backend'deki DEFAULT_SPEED ile eşleşmeli)
+const DEFAULT_SPEED = 0.8;
+
+// Adını LibraryScreen olarak tutuyorum, ancak içeriği bir önceki yanıttaki gibi düzenledim.
 const LibraryScreen = ({ navigation }) => {
   const colorScheme = useColorScheme();
   const themeStyles = getThemeStyles(colorScheme);
   const isDark = colorScheme === 'dark';
+  const [isUploading, setIsUploading] = useState(false);
 
-  const libraryBooks = [
-    { id: 1, title: 'The Silent Observer', author: 'Ethan Carter', imageUrl: 'https://picsum.photos/id/4/150/200' },
-    { id: 2, title: 'Echoes of the Past', author: 'Sophia Bennett', imageUrl: 'https://picsum.photos/id/5/150/200' },
-    { id: 3, title: 'The Hidden Path', author: 'Daniel Harper', imageUrl: 'https://picsum.photos/id/6/150/200' },
-  ];
+  // Zustand Store'dan aksiyonu çek
+  const addAudiobook = useAppStore(state => state.addAudiobook);
+
+  const libraryBooks = useAppStore(state => state.audiobooks);
+
+  const handleFileUpload = async () => {
+    const allowedTypes = ['application/pdf', 'application/epub+zip']; 
+
+    try {
+      const result = await DocumentPicker.getDocumentAsync({
+        type: allowedTypes,
+        copyToCacheDirectory: true,
+      });
+      
+      if (result.canceled) {
+        console.log("Dosya seçimi iptal edildi.");
+        return;
+      }
+      
+      const file = result.assets[0];
+      setIsUploading(true);
+
+      const baseFileName = file.name.substring(0, file.name.lastIndexOf('.')) || file.name;
+      
+      const formData = new FormData();
+      formData.append('file', {
+        uri: file.uri,
+        name: file.name,
+        type: file.mimeType || 'application/octet-stream',
+      });
+      formData.append('speed', DEFAULT_SPEED.toString());
+
+      const response = await axios.post(
+        SERVER_URL, 
+        formData, 
+        {
+          responseType: 'blob', 
+          headers: {
+            'Accept': 'audio/mpeg',
+          },
+          timeout: 300000,
+        }
+      );
+
+      if (response.status === 200 && response.data) {
+        const audioBlob = response.data;
+        // Dosya adı, uzantı olmadan dosya sisteminde benzersiz olmalıdır
+        const filename = `${Date.now()}_${baseFileName}_FULL_BOOK.mp3`; 
+        const localUri = FileSystem.cacheDirectory + filename;
+
+        const reader = new FileReader();
+        reader.readAsDataURL(audioBlob);
+        reader.onloadend = async () => {
+          try {
+            const base64Audio = reader.result.split(',')[1];
+            await FileSystem.writeAsStringAsync(localUri, base64Audio, { encoding: FileSystem.EncodingType.Base64 });
+
+            const uniqueId = Date.now().toString(); 
+            const newBook = {
+              id: uniqueId,
+              title: baseFileName, 
+              author: 'AI Narrator', 
+              imageUrl: 'https://picsum.photos/id/' + (Math.floor(Math.random() * 100) + 10) + '/150/200',
+              audioPath: localUri, 
+            };
+
+            addAudiobook(newBook);
+            Alert.alert("Başarılı", `${newBook.title} sesli kitap olarak eklendi!`);
+          } catch (e) {
+            console.error("Yerel Dosya Kayıt Hatası:", e);
+            Alert.alert("Hata", "Sesli kitap oluşturuldu ancak cihaza kaydedilemedi.");
+          }
+        };
+      } else {
+        const errorText = await response.data.text();
+        throw new Error(`Sunucu Hatası: ${response.status}. Detay: ${errorText}`);
+      }
+
+    } catch (err) {
+      if (axios.isCancel(err) || DocumentPicker.isCancel(err)) {
+        console.log("İşlem iptal edildi.");
+      } else {
+        console.error("Yükleme veya Ağ Hatası:", err);
+        Alert.alert("Hata", `Dosya yüklenirken bir sorun oluştu: ${err.message || "Bilinmeyen Hata"}`);
+      }
+    } finally {
+      setIsUploading(false);
+    }
+  };
+
 
   const styles = StyleSheet.create({
-    header: {
-        padding: 16,
-        paddingBottom: 8,
-        flexDirection: 'row',
-        alignItems: 'center',
-        justifyContent: 'space-between',
-        // Stack Navigasyon başlığı bunu zaten halledecektir, o yüzden bu kısmı kaldırıyorum.
-    },
-    headerButton: {
-      alignItems: 'center', 
-      justifyContent: 'center', 
-      height: 40, 
-      width: 40, 
-      borderRadius: 20, 
-      backgroundColor: Colors.primary
-    },
-    searchContainer: {
-      marginBottom: 16,
-      position: 'relative',
-      marginTop: 12,
-    },
-    searchInput: {
-      width: '100%',
-      borderRadius: 8,
-      borderWidth: 1,
-      borderColor: 'transparent',
-      backgroundColor: isDark ? 'rgba(255, 255, 255, 0.05)' : 'rgba(16, 28, 34, 0.05)',
-      paddingVertical: 12,
-      paddingLeft: 40,
-      paddingRight: 16,
-      color: isDark ? 'white' : Colors.slate900,
-    },
-    filterButton: {
-      flexShrink: 0,
-      borderRadius: 20,
-      paddingHorizontal: 16,
-      paddingVertical: 8,
-      marginRight: 8,
-    },
-    activeFilter: {
-      backgroundColor: Colors.primary,
-    },
-    inactiveFilter: {
-      backgroundColor: isDark ? 'rgba(255, 255, 255, 0.1)' : 'rgba(16, 28, 34, 0.1)',
-    },
-    bookItem: {
-      flexDirection: 'row',
+    uploadContainer: {
       alignItems: 'center',
       gap: 16,
-      paddingVertical: 8,
+      borderRadius: 8,
+      borderWidth: 2,
+      borderStyle: 'dashed',
+      borderColor: isDark ? Colors.slate700 : Colors.slate300,
+      paddingHorizontal: 24,
+      paddingVertical: 24, 
+      textAlign: 'center',
+      marginHorizontal: 16,
+      marginTop: 16,
+      marginBottom: 16, 
+    },
+    uploadButton: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: 8,
+      borderRadius: 8,
+      backgroundColor: isUploading ? Colors.slate500 : Colors.primary, 
+      paddingHorizontal: 20,
+      paddingVertical: 10,
+      shadowColor: isDark ? '#000' : '#000',
+      shadowOffset: { width: 0, height: 1 },
+      shadowOpacity: 0.2,
+      shadowRadius: 1.41,
+      elevation: 2,
+    },
+    bookCard: {
+      flexDirection: 'column',
+      gap: 12,
+      width: 160,
+      marginRight: 16, 
     },
     bookImage: {
-      height: 64,
-      width: 48,
-      flexShrink: 0,
-      borderRadius: 4,
-      backgroundColor: Colors.slate500,
+      width: '100%',
+      aspectRatio: 3 / 4,
+      borderRadius: 8,
+      backgroundColor: Colors.slate500, 
+      shadowColor: isDark ? '#000' : '#000',
+      shadowOffset: { width: 0, height: 2 },
+      shadowOpacity: 0.25,
+      shadowRadius: 3.84,
+      elevation: 5,
     },
     mainContent: {
-        flex: 1, 
-        paddingHorizontal: 16,
-        paddingTop: 8,
+      flexGrow: 1,
+      paddingBottom: 16,
+      marginTop: 12,
+    },
+    sectionTitle: {
+      paddingHorizontal: 16,
+      paddingBottom: 12,
+      paddingTop: 8,
+      fontSize: 20,
+      fontWeight: 'bold',
+      color: isDark ? 'white' : Colors.slate900,
     },
   });
 
-  // Header'daki "+" butonu için özel bileşen (Stack Navigator başlığını kullanmak için)
-  React.useLayoutEffect(() => {
-    navigation.setOptions({
-      headerRight: () => (
-        <TouchableOpacity style={styles.headerButton}>
-          <Feather name="plus" size={24} color="white" />
-        </TouchableOpacity>
-      ),
-      headerLeft: () => (
-          // Drawer menü butonu Stack Navigator'da zaten tanımlı
-          <TouchableOpacity 
-            onPress={() => navigation.openDrawer()}
-            style={{ paddingHorizontal: 16, height: 40, justifyContent: 'center' }}
-          >
-              <Feather name="menu" size={24} color={isDark ? 'white' : 'black'} />
-          </TouchableOpacity>
-      ),
-    });
-  }, [navigation, isDark]);
 
   return (
     <SafeAreaView style={themeStyles.container}>
-      <View style={styles.mainContent}>
-        <View style={styles.searchContainer}>
-          <View style={{ position: 'absolute', top: 0, bottom: 0, left: 0, flexDirection: 'row', alignItems: 'center', paddingLeft: 12, zIndex: 1 }}>
-            <Feather name="search" size={20} color={Colors.slate400} />
+      <ScrollView contentContainerStyle={styles.mainContent}>
+        {/* YÜKLEME BÖLÜMÜ */}
+        <View style={styles.uploadContainer}>
+          <View style={{ alignItems: 'center', gap: 8 }}>
+            <Text style={{ fontSize: 18, fontWeight: 'bold', color: isDark ? 'white' : Colors.slate900 }}>Upload a new file</Text>
+            <Text style={{ fontSize: 14, color: isDark ? Colors.slate400 : Colors.slate600 }}>Supported formats: PDF, EPUB</Text>
           </View>
-          <TextInput
-            style={styles.searchInput}
-            placeholder="Search your library"
-            placeholderTextColor={isDark ? Colors.slate400 : Colors.slate500}
-            keyboardAppearance={colorScheme}
-          />
+          <TouchableOpacity 
+            style={styles.uploadButton} 
+            onPress={isUploading ? null : handleFileUpload} 
+            disabled={isUploading}
+          >
+            {isUploading ? (
+              <ActivityIndicator color="white" />
+            ) : (
+              <MaterialIcons name="cloud-upload" size={16} color="white" />
+            )}
+            <Text style={{ fontSize: 14, fontWeight: 'bold', color: 'white' }}>
+              {isUploading ? "Uploading..." : "Upload"}
+            </Text>
+          </TouchableOpacity>
         </View>
 
-        {/* Filter Buttons */}
-        <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginBottom: 24, paddingBottom: 8 }}>
-          <TouchableOpacity style={[styles.filterButton, styles.activeFilter]}>
-            <Text style={{ fontSize: 14, fontWeight: '500', color: 'white' }}>All</Text>
-          </TouchableOpacity>
-          <TouchableOpacity style={[styles.filterButton, styles.inactiveFilter]}>
-            <Text style={{ fontSize: 14, fontWeight: '500', color: isDark ? Colors.slate300 : Colors.slate700 }}>Audiobooks</Text>
-          </TouchableOpacity>
-          <TouchableOpacity style={[styles.filterButton, styles.inactiveFilter]}>
-            <Text style={{ fontSize: 14, fontWeight: '500', color: isDark ? Colors.slate300 : Colors.slate700 }}>PDFs</Text>
-          </TouchableOpacity>
-        </ScrollView>
 
-        {/* Book List */}
-        <Text style={{ marginBottom: 12, fontSize: 18, fontWeight: 'bold', color: isDark ? 'white' : Colors.slate900 }}>Recently Added</Text>
-        <ScrollView>
+        <Text style={styles.sectionTitle}>Recently Added</Text>
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ paddingHorizontal: 16 }}>
           {libraryBooks.map((book) => (
-            <TouchableOpacity key={book.id} style={styles.bookItem} onPress={() => navigation.navigate('AudioBookPlayer')}>
+            <TouchableOpacity 
+              key={book.id} 
+              style={styles.bookCard} 
+              // ✅ GÜNCELLEME: Kitap verisini AudioBookPlayer'a gönderiyoruz
+              onPress={() => navigation.navigate('AudioBookPlayer', { bookData: book })}
+            >
               <Image source={{ uri: book.imageUrl }} style={styles.bookImage} />
-              <View style={{ flexGrow: 1 }}>
-                <Text style={{ fontWeight: '600', color: isDark ? 'white' : Colors.slate900 }}>{book.title}</Text>
-                <Text style={{ fontSize: 12, color: isDark ? Colors.slate400 : Colors.slate600 }}>{book.author}</Text>
+              <View>
+                <Text numberOfLines={1} style={{ fontWeight: '500', color: isDark ? Colors.slate100 : Colors.slate800 }}>{book.title}</Text>
+                <Text style={{ fontSize: 12, color: isDark ? Colors.slate400 : Colors.slate500 }}>{book.author}</Text>
               </View>
-              <TouchableOpacity style={{ padding: 8 }}>
-                <Feather name="more-vertical" size={24} color={isDark ? Colors.slate400 : Colors.slate500} />
-              </TouchableOpacity>
             </TouchableOpacity>
           ))}
         </ScrollView>
-      </View>
-
-      {/* Footer / Tab Navigation */}
+      </ScrollView>
       <BottomTabBar navigation={navigation} currentRouteName="LibraryStack" />
     </SafeAreaView>
   );

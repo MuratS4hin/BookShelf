@@ -86,7 +86,7 @@ const SettingsScreen = ({ navigation }) => {
                         </View>
                     </View>
 
-                    {/* Notifications */}
+                    {/* Notifications 
                     <View>
                         <Text style={styles.sectionHeader}>Notifications</Text>
                         <View style={styles.listGroup}>
@@ -96,10 +96,6 @@ const SettingsScreen = ({ navigation }) => {
                             </TouchableOpacity>
                         </View>
                     </View>
-
-                    {/* ... (Diğer ayar grupları) */}
-
-                    {/* Actions */}
                     <View style={{ paddingTop: 16, paddingBottom: 32 }}>
                         <TouchableOpacity style={[styles.actionButton, styles.logoutButton]}>
                             <Text style={{ fontWeight: 'bold', color: Colors.primary }}>Log Out</Text>
@@ -107,7 +103,7 @@ const SettingsScreen = ({ navigation }) => {
                         <TouchableOpacity style={styles.actionButton}>
                             <Text style={{ fontWeight: 'bold', color: isDark ? 'red' : 'red' }}>Delete Account</Text>
                         </TouchableOpacity>
-                    </View>
+                    </View>*/}
                 </View>
             </ScrollView>
 
