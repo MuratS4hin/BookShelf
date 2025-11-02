@@ -15,9 +15,9 @@ const AudioPlayerScreen = ({ route, navigation }) => {
     const [sound, setSound] = useState(null);
     const [isPlaying, setIsPlaying] = useState(false);
     // İlk yükleme, sesin belleğe alınması
-    const [isLoadInitial, setIsLoadInitial] = useState(true); 
+    const [isLoadInitial, setIsLoadInitial] = useState(true);
     // Sesin arabelleğe alınması
-    const [isBuffering, setIsBuffering] = useState(false); 
+    const [isBuffering, setIsBuffering] = useState(false);
     const [position, setPosition] = useState(0);
     const [duration, setDuration] = useState(0);
     const [playbackSpeed, setPlaybackSpeed] = useState(1.0); // Oynatma hızı
@@ -28,7 +28,7 @@ const AudioPlayerScreen = ({ route, navigation }) => {
         setDuration(status.durationMillis || 0);
         setPosition(status.positionMillis || 0);
         setIsBuffering(status.isBuffering);
-        
+
         if (status.didJustFinish) {
             setIsPlaying(false);
             setPosition(0);
@@ -76,9 +76,9 @@ const AudioPlayerScreen = ({ route, navigation }) => {
         // Temizleme: Component kapatıldığında sesi bellekten sil
         return sound
             ? () => {
-                  console.log('Unloading Sound');
-                  sound.unloadAsync();
-              }
+                console.log('Unloading Sound');
+                sound.unloadAsync();
+            }
             : undefined;
     }, [book?.audioPath]); // book?.audioPath'i dependency olarak ekledim
 
@@ -96,7 +96,7 @@ const AudioPlayerScreen = ({ route, navigation }) => {
             console.error("Oynatma Hatası:", e);
         }
     };
-    
+
     // ✅ YENİ: İleri/Geri Sarma İşlevi
     const handleSkip = async (direction) => {
         if (!sound || disabled) return;
@@ -128,9 +128,9 @@ const AudioPlayerScreen = ({ route, navigation }) => {
         const hours = Math.floor(totalSeconds / 3600);
         const minutes = Math.floor((totalSeconds % 3600) / 60);
         const seconds = totalSeconds % 60;
-        
+
         const paddedSeconds = seconds < 10 ? `0${seconds}` : seconds;
-        
+
         if (hours > 0) {
             const paddedMinutes = minutes < 10 ? `0${minutes}` : minutes;
             return `${hours}:${paddedMinutes}:${paddedSeconds}`;
@@ -138,131 +138,12 @@ const AudioPlayerScreen = ({ route, navigation }) => {
         return `${minutes}:${paddedSeconds}`;
     };
 
-    const styles = StyleSheet.create({
-        container: {
-            flex: 1,
-            backgroundColor: Colors.backgroundDark,
-        },
-        header: {
-            flexDirection: 'row',
-            alignItems: 'center',
-            justifyContent: 'space-between',
-            padding: 16,
-            paddingBottom: 8,
-        },
-        headerButton: {
-            alignItems: 'center',
-            justifyContent: 'center',
-            width: 48,
-            height: 48,
-            flexShrink: 0,
-        },
-        mainContent: {
-            flexGrow: 1,
-            alignItems: 'center',
-            justifyContent: 'center',
-            paddingHorizontal: 16,
-            paddingTop: 32,
-            paddingBottom: 16,
-        },
-        coverArt: {
-            width: '100%',
-            maxWidth: 384,
-            aspectRatio: 1,
-            borderRadius: 12,
-            backgroundColor: Colors.slate600,
-            shadowColor: '#000',
-            shadowOffset: { width: 0, height: 4 },
-            shadowOpacity: 0.3,
-            shadowRadius: 4.65,
-            elevation: 8,
-        },
-        title: {
-            color: 'white',
-            fontSize: 28,
-            fontWeight: 'bold',
-            marginTop: 32,
-            textAlign: 'center',
-        },
-        author: {
-            color: Colors.slate400,
-            fontSize: 16,
-            marginTop: 4,
-            textAlign: 'center',
-        },
-        progressBarContainer: {
-            width: '100%',
-            maxWidth: 384,
-            marginTop: 32,
-        },
-        progressBar: {
-            height: 8,
-            flexDirection: 'row',
-            alignItems: 'center',
-        },
-        progressFilled: {
-            height: 6,
-            borderRadius: 3,
-            backgroundColor: primaryColor,
-        },
-        progressKnob: {
-            position: 'absolute',
-            width: 16,
-            height: 16,
-            borderRadius: 8,
-            backgroundColor: primaryColor,
-            borderWidth: 4,
-            borderColor: Colors.backgroundDark,
-        },
-        controlButtons: {
-            flexDirection: 'row',
-            alignItems: 'center',
-            justifyContent: 'center',
-            gap: 24,
-            marginTop: 32,
-            width: '100%',
-            maxWidth: 384,
-        },
-        skipButton: {
-            alignItems: 'center',
-            justifyContent: 'center',
-            borderRadius: 30,
-            width: 48,
-            height: 48,
-        },
-        playPauseButton: {
-            alignItems: 'center',
-            justifyContent: 'center',
-            borderRadius: 40,
-            width: 80,
-            height: 80,
-            backgroundColor: primaryColor,
-        },
-        speedVolumeContainer: {
-            flexDirection: 'row',
-            justifyContent: 'space-between',
-            alignItems: 'center',
-            width: '100%',
-            maxWidth: 384,
-            marginTop: 32,
-        },
-        speedOption: {
-            paddingHorizontal: 8,
-            paddingVertical: 4,
-            borderRadius: 4,
-        },
-        speedText: {
-            fontSize: 14, 
-            fontWeight: '500',
-        }
-    });
-    
     // İlerleme çubuğu pozisyonu
     const currentProgressPercent = duration > 0 ? (position / duration) * 100 : 0;
     const playIcon = isPlaying ? "pause" : "play-arrow";
     // Ses dosyası ve başlangıç yüklemesi kontrolü
     const disabled = isLoadInitial || !book?.audioPath;
-    
+
     return (
         <SafeAreaView style={styles.container}>
             {/* Header */}
@@ -272,23 +153,23 @@ const AudioPlayerScreen = ({ route, navigation }) => {
                 </TouchableOpacity>
                 <Text style={{ color: 'white', fontSize: 18, fontWeight: 'bold', flex: 1, textAlign: 'center' }}>Now Playing</Text>
                 <TouchableOpacity style={styles.headerButton}>
-                    <MaterialIcons name="more-vert" size={24} color="white" />
+                    {/* <MaterialIcons name="more-vert" size={24} color="white" /> */}
                 </TouchableOpacity>
             </View>
 
             {/* Main Content */}
             <View style={styles.mainContent}>
                 {/* Cover Art */}
-                <Image 
-                    source={{ uri: book.imageUrl }} 
+                <Image
+                    source={{ uri: book.imageUrl }}
                     style={styles.coverArt}
                     resizeMode="cover"
                 />
-                
+
                 {/* Book Info */}
                 <Text style={styles.title}>{book.title}</Text>
                 <Text style={styles.author}>{book.author}</Text>
-                
+
                 {/* Progress Bar */}
                 <View style={styles.progressBarContainer}>
                     {(isLoadInitial || isBuffering) && duration === 0 ? (
@@ -309,15 +190,15 @@ const AudioPlayerScreen = ({ route, navigation }) => {
                 {/* Playback Controls */}
                 <View style={styles.controlButtons}>
                     {/* ✅ Geri Sarma (-10 saniye) */}
-                    <TouchableOpacity 
-                        style={styles.skipButton} 
+                    <TouchableOpacity
+                        style={styles.skipButton}
                         onPress={() => handleSkip(-1)} // -1, geri sarma yönünü belirtir
                         disabled={disabled}
                     >
                         <MaterialIcons name="replay-10" size={36} color={disabled ? Colors.slate700 : "rgba(255, 255, 255, 0.8)"} />
                     </TouchableOpacity>
-                    <TouchableOpacity 
-                        style={styles.playPauseButton} 
+                    <TouchableOpacity
+                        style={styles.playPauseButton}
                         onPress={handlePlayPause}
                         disabled={disabled}
                     >
@@ -328,8 +209,8 @@ const AudioPlayerScreen = ({ route, navigation }) => {
                         )}
                     </TouchableOpacity>
                     {/* ✅ İleri Sarma (+10 saniye) */}
-                    <TouchableOpacity 
-                        style={styles.skipButton} 
+                    <TouchableOpacity
+                        style={styles.skipButton}
                         onPress={() => handleSkip(1)} // 1, ileri sarma yönünü belirtir
                         disabled={disabled}
                     >
@@ -339,13 +220,13 @@ const AudioPlayerScreen = ({ route, navigation }) => {
 
                 {/* Additional Controls */}
                 <View style={styles.speedVolumeContainer}>
-                    <TouchableOpacity style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
-                        <MaterialIcons name="volume-up" size={20} color={Colors.slate400} />
+                    <TouchableOpacity style={{ flexDirection: 'row', alignItems: 'center', gap: 0 }}>
+                        {/* <MaterialIcons name="volume-up" size={20} color={Colors.slate400} /> */}
                     </TouchableOpacity>
-                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-                        {[{rate: 0.75, label: '0.75x'}, {rate: 1.0, label: '1x'}, {rate: 1.5, label: '1.5x'}, {rate: 2.0, label: '2x'}].map((speedOption, index) => (
-                            <TouchableOpacity 
-                                key={index} 
+                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 0 }}>
+                        {[{ rate: 0.75, label: '0.75x' }, { rate: 1.0, label: '1x' }, { rate: 1.5, label: '1.5x' }, { rate: 2.0, label: '2x' }].map((speedOption, index) => (
+                            <TouchableOpacity
+                                key={index}
                                 style={[styles.speedOption, speedOption.rate === playbackSpeed && { backgroundColor: Colors.slate700 }]}
                                 onPress={() => handleSpeedChange(speedOption.rate)}
                                 disabled={disabled}
@@ -356,8 +237,8 @@ const AudioPlayerScreen = ({ route, navigation }) => {
                             </TouchableOpacity>
                         ))}
                     </View>
-                    <TouchableOpacity style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
-                        <MaterialIcons name="timer" size={20} color={Colors.slate400} />
+                    <TouchableOpacity style={{ flexDirection: 'row', alignItems: 'center', gap: 0 }}>
+                        {/* <MaterialIcons name="timer" size={20} color={Colors.slate400} /> */}
                     </TouchableOpacity>
                 </View>
             </View>
@@ -366,3 +247,123 @@ const AudioPlayerScreen = ({ route, navigation }) => {
 };
 
 export default AudioPlayerScreen;
+
+
+const styles = StyleSheet.create({
+    container: {
+        flex: 1,
+        backgroundColor: Colors.backgroundDark,
+    },
+    header: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        padding: 16,
+        paddingBottom: 8,
+    },
+    headerButton: {
+        alignItems: 'center',
+        justifyContent: 'center',
+        width: 48,
+        height: 48,
+        flexShrink: 0,
+    },
+    mainContent: {
+        flexGrow: 1,
+        alignItems: 'center',
+        justifyContent: 'center',
+        paddingHorizontal: 16,
+        paddingTop: 32,
+        paddingBottom: 16,
+    },
+    coverArt: {
+        width: '100%',
+        maxWidth: 384,
+        aspectRatio: 1,
+        borderRadius: 12,
+        backgroundColor: Colors.slate600,
+        shadowColor: '#000',
+        shadowOffset: { width: 0, height: 4 },
+        shadowOpacity: 0.3,
+        shadowRadius: 4.65,
+        elevation: 8,
+    },
+    title: {
+        color: 'white',
+        fontSize: 28,
+        fontWeight: 'bold',
+        marginTop: 32,
+        textAlign: 'center',
+    },
+    author: {
+        color: Colors.slate400,
+        fontSize: 16,
+        marginTop: 4,
+        textAlign: 'center',
+    },
+    progressBarContainer: {
+        width: '100%',
+        maxWidth: 384,
+        marginTop: 32,
+    },
+    progressBar: {
+        height: 8,
+        flexDirection: 'row',
+        alignItems: 'center',
+    },
+    progressFilled: {
+        height: 6,
+        borderRadius: 3,
+        backgroundColor: primaryColor,
+    },
+    progressKnob: {
+        position: 'absolute',
+        width: 16,
+        height: 16,
+        borderRadius: 8,
+        backgroundColor: primaryColor,
+        borderWidth: 4,
+        borderColor: Colors.backgroundDark,
+    },
+    controlButtons: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        justifyContent: 'center',
+        gap: 24,
+        marginTop: 32,
+        width: '100%',
+        maxWidth: 384,
+    },
+    skipButton: {
+        alignItems: 'center',
+        justifyContent: 'center',
+        borderRadius: 30,
+        width: 48,
+        height: 48,
+    },
+    playPauseButton: {
+        alignItems: 'center',
+        justifyContent: 'center',
+        borderRadius: 40,
+        width: 80,
+        height: 80,
+        backgroundColor: primaryColor,
+    },
+    speedVolumeContainer: {
+        flexDirection: 'row',
+        justifyContent: 'space-between',
+        alignItems: 'center',
+        width: '100%',
+        maxWidth: 384,
+        marginTop: 16,
+    },
+    speedOption: {
+        paddingHorizontal: 8,
+        paddingVertical: 4,
+        borderRadius: 4,
+    },
+    speedText: {
+        fontSize: 14,
+        fontWeight: '500',
+    }
+});

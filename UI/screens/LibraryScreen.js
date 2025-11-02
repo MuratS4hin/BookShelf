@@ -9,7 +9,7 @@ import useAppStore from '../store/UseAppStore';
 import { Colors, getThemeStyles } from '../utils/ThemeStyles';
 import BottomTabBar from '../navigation/BottomNavBar';
 
-const SERVER_IP = '192.168.1.30';
+const SERVER_IP = '192.168.0.11';
 const SERVER_PORT = '5002';
 const ENDPOINT = '/generate-audiobook/';
 const SERVER_URL = `http://${SERVER_IP}:${SERVER_PORT}${ENDPOINT}`;

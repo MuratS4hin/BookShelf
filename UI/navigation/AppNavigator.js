@@ -27,7 +27,7 @@ function HomeStackScreen() {
         name="AudioBookPlayer"
         component={AudioBookPlayerScreen}
         // ✅ GÜNCELLEME: Player ekranında Stack header'ını göster
-        options={{ title: 'Audio Player', headerShown: true }} 
+        options={{ title: 'Audio Player', headerShown: false }} 
       />
     </HomeStack.Navigator>
   );
@@ -50,7 +50,7 @@ function LibraryStackScreen() {
         name="AudioBookPlayer"
         component={AudioBookPlayerScreen}
         // ✅ GÜNCELLEME: Player ekranında Stack header'ını göster
-        options={{ title: 'Audio Player', headerShown: true }}
+        options={{ title: 'Audio Player', headerShown: false }}
       />
       {/* Settings ekranı da bu Stack üzerinden açılabilir, ancak burada sadece Player'ı tuttum. */}
     </LibraryStack.Navigator>
