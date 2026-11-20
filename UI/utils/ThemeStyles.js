@@ -13,7 +13,9 @@ export const Colors = {
     textDark: '#101c22',
     slate800: '#1f2937', // koyu mod başlık
     slate900: '#0f172a', // koyu mod başlık
+    slate700: '#334155',
     slate100: '#f1f5f9', // açık mod metin
+    slate200: '#e2e8f0',
     slate300: '#cbd5e1', // açık mod metin
     slate400: '#94a3b8', // gri metin
     slate500: '#64748b', // gri metin

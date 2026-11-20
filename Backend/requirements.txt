@@ -1,0 +1,29 @@
+# Core web API
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+python-multipart>=0.0.9
+pydantic>=2.7.0
+email-validator>=2.1.0
+
+# Database
+sqlalchemy>=2.0.23
+psycopg2-binary>=2.9.9
+alembic>=1.13.1
+
+# PDF and EPUB extraction
+pymupdf>=1.24.0
+pypdf>=3.17.1
+ebooklib>=0.18.0
+beautifulsoup4>=4.12.2
+lxml>=5.0.0
+
+# Deep Neural Network (text cleaner) & Neural TTS (Piper ONNX)
+torch>=2.2.0
+numpy>=1.26.0
+piper-tts>=1.2.0
+onnxruntime>=1.18.0
+
+# Audio & HTTP utilities
+pydub>=0.25.1
+requests>=2.31.0
+python-dotenv>=1.0.0

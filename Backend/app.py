@@ -1,329 +1,407 @@
+"""Bookshelf API: import PDF/EPUB -> neural text cleaning -> neural TTS audiobook.
+
+Pipeline (runs in a background worker thread for every uploaded book):
+
+  1. extract   : text + layout (position, font size, ...) from PDF / EPUB
+  2. clean     : a deep neural network (ai/model.py) labels every line as body,
+                 heading, page number, header/footer, footnote or noise; only
+                 body + headings are kept and re-assembled into paragraphs
+  3. narrate   : Piper neural TTS reads the cleaned text
+  4. encode    : FFmpeg compresses the result to MP3
+
+Run (from the Backend folder):
+    venv/bin/uvicorn app:app --host 0.0.0.0 --port 5002
+"""
+import logging
 import os
-import requests
-import re
-import sys
-import io
+import shutil
 import time
+import uuid
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import asynccontextmanager
 from pathlib import Path
-from pypdf import PdfReader
-import ebooklib
-from ebooklib import epub
-from bs4 import BeautifulSoup
-from fastapi import FastAPI, UploadFile, File, BackgroundTasks, HTTPException
-from starlette.responses import FileResponse, JSONResponse
+from typing import Optional
 
-# --- External Library Check ---
-# NOTE: pydub requires the external program FFmpeg to be installed on your system.
-try:
-    from pydub import AudioSegment
-except ImportError:
-    print("Error: pydub library not found. Please run 'pip install pydub'")
-    AudioSegment = None
+from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, HTTPException, UploadFile
+from fastapi.concurrency import run_in_threadpool
+from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy.orm import Session
+from starlette.responses import FileResponse, JSONResponse, PlainTextResponse
 
-# --- Configuration for the TTS Server and Processing ---
-# NOTE: In a production environment, this should be configurable
-TTS_SERVER_URL = os.getenv("TTS_SERVER_URL", "http://localhost:5001")
-CHUNK_SIZE_LIMIT = 800  # Max characters per chunk for API call
-DEFAULT_SPEED = 0.8     # Default speaker speed
-TEMP_DIR = Path("temp_processing") # Directory for file uploads and audio chunks
+from database import init_db
+from database.db import AudioBook, Book, SessionLocal
+from database.routes import router as database_router
+from database.services import AudioBookService, BookService
+
+from ai.cleaner import get_cleaner
+from ai.extraction import ExtractionError, extract_cover, extract_document
+from ai.tts import DEFAULT_VOICE, TTS_BACKEND, Narrator, TTSError
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+log = logging.getLogger("bookshelf")
 
 # ----------------------------------------------------------------------
-# Core Functions (from original script)
+# Configuration
+# ----------------------------------------------------------------------
+BASE_DIR = Path(__file__).resolve().parent
+STORAGE_DIR = Path(os.getenv("STORAGE_DIR", BASE_DIR / "storage"))
+UPLOAD_DIR = STORAGE_DIR / "uploads"
+AUDIO_DIR = STORAGE_DIR / "audio"
+TEXT_DIR = STORAGE_DIR / "text"
+COVER_DIR = STORAGE_DIR / "covers"
+TMP_DIR = STORAGE_DIR / "tmp"
+for _d in (UPLOAD_DIR, AUDIO_DIR, TEXT_DIR, COVER_DIR, TMP_DIR):
+    _d.mkdir(parents=True, exist_ok=True)
+
+DEFAULT_SPEED = 1.0  # 1.0 = natural speed, 1.25 = 25% faster, 0.8 = slower
+ALLOWED_TYPES = {".pdf", ".epub"}
+MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "200"))
+
+# One worker = books are narrated one after another (TTS is CPU heavy).
+executor = ThreadPoolExecutor(max_workers=int(os.getenv("TTS_WORKERS", "1")), thread_name_prefix="narrator")
+
+
+# ----------------------------------------------------------------------
+# Pipeline
 # ----------------------------------------------------------------------
 
-def cleanup_files(file_paths, output_file_path=None):
-    """
-    Deletes all temporary audio chunk files and the final output file (if it exists).
-    """
-    print(f"\n--- Starting Temporary File Cleanup ---")
-    deleted_count = 0
-    
-    # Delete temporary chunks
-    for path in file_paths:
+def run_pipeline(source_path: Path, mp3_path: Path, text_path: Path, speed: float, voice: str,
+                 on_progress=None, on_stage=None, on_metadata=None) -> float:
+    """Extract -> clean (DNN) -> narrate (TTS) -> MP3. Returns duration in seconds."""
+    stage = on_stage or (lambda s, p: None)
+
+    stage("extracting", 1.0)
+    doc = extract_document(str(source_path))
+    if on_metadata:
+        on_metadata(doc.title, doc.author)
+
+    stage("cleaning", 3.0)
+    result = get_cleaner().clean(doc)
+    log.info("Cleaner (%s) label counts: %s", "DNN" if result.used_model else "heuristic", result.label_counts)
+    if not result.paragraphs:
+        raise ExtractionError("No readable body text was found after cleaning.")
+    with open(text_path, "w", encoding="utf-8") as f:
+        for p in result.paragraphs:
+            f.write(("## " + p.text if p.kind == "heading" else p.text) + "\n\n")
+
+    stage("narrating", 5.0)
+    narrator = Narrator(voice=voice, speed=speed)
+    duration = narrator.narrate(
+        result.paragraphs, mp3_path,
+        progress=lambda frac: on_progress and on_progress(5.0 + frac * 93.0),
+    )
+    stage("encoding", 99.0)
+    return duration
+
+
+def process_audiobook_job(book_id: int, audiobook_id: int, source_path: str, speed: float, voice: str):
+    """Background job (runs in the worker thread)."""
+    db = SessionLocal()
+    last = {"p": -1.0}
+
+    def update(**kw):
         try:
-            path.unlink()
-            deleted_count += 1
-        except FileNotFoundError:
-            continue
-        except Exception as e:
-            print(f"Warning: Could not delete temporary file {path.name}: {e}")
-            
-    # Attempt to delete final output file
-    if output_file_path and Path(output_file_path).is_file():
-        try:
-            Path(output_file_path).unlink()
-            print(f"Deleted final output file: {output_file_path}")
-        except Exception as e:
-            print(f"Warning: Could not delete final output file {output_file_path}: {e}")
-            
-    print(f"Cleaned up {deleted_count} temporary audio chunks.")
-    
-    # Attempt to remove the processing directory if it's empty.
+            AudioBookService.update_audiobook(db, audiobook_id, **kw)
+        except Exception as exc:  # never let a DB hiccup kill the job
+            log.warning("progress update failed: %s", exc)
+            db.rollback()
+
+    def on_progress(p):
+        if p - last["p"] >= 1.0:
+            last["p"] = p
+            update(progress=round(p, 1))
+
+    def on_stage(stage, p):
+        update(stage=stage, progress=p, generation_status="processing")
+
+    def on_metadata(title, author):
+        book = BookService.get_book(db, book_id)
+        if not book:
+            return
+        changes = {}
+        if title and len(title) > 2 and book.title == Path(book.file_name).stem:
+            changes["title"] = title[:250]
+        if author and (not book.author or book.author == "Unknown"):
+            changes["author"] = author[:250]
+        if changes:
+            BookService.update_book(db, book_id, **changes)
+
+    mp3_path = AUDIO_DIR / f"book_{book_id}_{audiobook_id}.mp3"
+    text_path = TEXT_DIR / f"book_{book_id}.txt"
+    t0 = time.time()
     try:
-        TEMP_DIR.rmdir()
-        print(f"Removed empty directory: {TEMP_DIR}")
-    except OSError:
-        pass
-
-
-def process_text_in_chunks(full_text, base_output_name, server_url=TTS_SERVER_URL, speed=DEFAULT_SPEED):
-    # ... (Keep the content of your original process_text_in_chunks function here) ...
-    # IMPORTANT: Update AUDIO_DIR to TEMP_DIR in this function!
-    if AudioSegment is None:
-        print("\nCannot process audio chunks: pydub is required.")
-        return []
-            
-    TEMP_DIR.mkdir(exist_ok=True)
-            
-    # 1. Segmentation logic (unchanged)
-    paragraphs = re.split(r'(\n\n+|\r\n\r\n+)', full_text)
-    final_chunks = []
-    for p in paragraphs:
-        if len(p.strip()) > CHUNK_SIZE_LIMIT:
-            sub_chunks = [p[i:i + CHUNK_SIZE_LIMIT] for i in range(0, len(p), CHUNK_SIZE_LIMIT)]
-            final_chunks.extend(sub_chunks)
-        elif p.strip():
-            final_chunks.append(p.strip())
-
-    output_files = []
-            
-    print(f"\n--- TTS Synthesis Started ---")
-    print(f"Total text length: {len(full_text)} chars.")
-    print(f"Processing {len(final_chunks)} audio chunks...")
-
-    for i, chunk in enumerate(final_chunks):
-        if not chunk.strip():
-            continue
-
-        payload = {"text": chunk, "speaker_speed": speed}
-        # Chunks are saved as WAV, but with reduced sample rate for size
-        output_filename = TEMP_DIR / f"{base_output_name}_chunk_{i:04d}.wav"
-
-        print(f"  -> Processing chunk {i+1}/{len(final_chunks)} (Chars: {len(chunk)})...")
-
-        try:
-            response = requests.post(
-                server_url,
-                json=payload,
-                headers={'Content-Type': 'application/json'},
-                timeout=120
-            )
-            
-            if response.status_code == 200:
-                try:
-                    # Load the raw audio content (assuming it's standard WAV)
-                    raw_audio_io = io.BytesIO(response.content)
-                    temp_segment = AudioSegment.from_file(raw_audio_io, format="wav")
-                    
-                    # --- COMPRESSION STEP 1: Shrink temporary WAV file by reducing sample rate (e.g., to 22.05kHz) ---
-                    compressed_segment = temp_segment.set_frame_rate(22050)
-                    
-                    # Save the compressed WAV chunk
-                    compressed_segment.export(output_filename, format="wav")
-                    output_files.append(output_filename)
-
-                except Exception as audio_err:
-                    print(f"Warning: pydub failed to process/compress audio data for chunk {i}: {audio_err}. Skipping chunk file.")
-
-            else:
-                print(f"ERROR: Failed to process chunk {i}. Status: {response.status_code}.")
-                
-        except requests.exceptions.RequestException as e:
-            print(f"NETWORK ERROR: Failed to reach TTS server for chunk {i}: {e}")
-            
-    print(f"--- TTS Synthesis Finished ---")
-    return output_files
-
-def merge_audio_files(chunk_file_paths, output_filename_base):
-    # ... (Keep the content of your original merge_audio_files function here) ...
-    if AudioSegment is None:
-        print("\nSkipping merge: 'pydub' is not imported or FFmpeg is missing.")
-        return None
-            
-    print(f"\n--- Merging {len(chunk_file_paths)} Chunks ---")
-            
-    # --- COMPRESSION STEP 2: Final output is MP3 ---
-    final_output_path = TEMP_DIR / f"{output_filename_base}_FULL_BOOK.mp3"
-            
-    if not chunk_file_paths:
-        print("No audio files were generated to merge.")
-        return None
-
-    try:
-        combined_audio = AudioSegment.empty()
-
-        for path in chunk_file_paths:
-            print(f"  -> Appending {path.name}...")
-            # Load the pre-compressed WAV chunk
-            segment = AudioSegment.from_wav(path)
-            combined_audio += segment
-
-        # Export the combined audio file as MP3 with a high-quality, compressed bitrate
-        print(f"  -> Exporting final merged file to: {final_output_path} (MP3, 192kbps)")
-        combined_audio.export(final_output_path, format="mp3", bitrate="192k")
-            
-        print(f"✅ FINAL MERGE COMPLETE: {final_output_path}")
-        return str(final_output_path)
-
-    except Exception as e:
-        print(f"!!! CRITICAL MERGE ERROR !!!")
-        print(f"Failed to merge audio files. Error: {e}")
-        print("Ensure FFmpeg is correctly installed and accessible on your system.")
-        return None
-
-
-def extract_text_from_file(file_path):
-    # ... (Keep the content of your original extract_text_from_file function here) ...
-    # This function is fine as-is, just ensure the helper functions below are also included.
-    file = Path(file_path)
-    if not file.is_file():
-        return f"Error: File not found at {file_path}"
-            
-    if file.suffix.lower() == '.pdf':
-        print(f"Detected PDF file: {file.name}")
-        return extract_text_from_pdf(file_path)
-            
-    elif file.suffix.lower() == '.epub':
-        print(f"Detected EPUB file: {file.name}")
-        return extract_text_from_epub(file_path)
-            
-    else:
-        return f"Error: Unsupported file type: {file.suffix}"
-
-# (Keep extract_text_from_pdf and extract_text_from_epub functions here)
-def extract_text_from_pdf(pdf_path):
-    text = []
-    try:
-        reader = PdfReader(pdf_path)
-        for page in reader.pages:
-            text.append(page.extract_text())
-            
-        full_text = "\n\n".join(t.strip() for t in text if t)
-        return re.sub(r' +', ' ', full_text).replace(" \n", " ").replace("\n\n\n", "\n\n")
-            
-    except Exception as e:
-        return f"Error extracting PDF text: {e}"
-
-def extract_text_from_epub(epub_path):
-    text_content = []
-    try:
-        book = epub.read_epub(epub_path)
-            
-        for item in book.get_items():
-            if item.get_type() == ebooklib.ITEM_DOCUMENT:
-                soup = BeautifulSoup(item.get_content(), 'html.parser')
-                text = soup.get_text()
-                cleaned_text = " ".join(text.split())
-                if cleaned_text:
-                    text_content.append(cleaned_text)
-                            
-        return "\n\n".join(text_content)
-            
-    except Exception as e:
-        return f"Error extracting EPUB text: {e}"
+        log.info("Starting audiobook job book_id=%s audiobook_id=%s", book_id, audiobook_id)
+        duration = run_pipeline(Path(source_path), mp3_path, text_path, speed, voice,
+                                on_progress=on_progress, on_stage=on_stage, on_metadata=on_metadata)
+        update(file_path=str(mp3_path), file_name=mp3_path.name, file_size=mp3_path.stat().st_size,
+               duration=duration, generation_status="completed", progress=100.0, stage="done",
+               text_path=str(text_path))
+        log.info("✅ Audiobook ready for book_id=%s (%.0fs audio, took %.0fs)", book_id, duration, time.time() - t0)
+    except (ExtractionError, TTSError) as exc:
+        log.error("Audiobook job failed for book_id=%s: %s", book_id, exc)
+        update(generation_status="failed", error_message=str(exc), stage="failed")
+    except Exception as exc:
+        log.exception("Unexpected error in audiobook job for book_id=%s", book_id)
+        update(generation_status="failed", error_message=f"Internal error: {exc}", stage="failed")
+    finally:
+        db.close()
 
 
 # ----------------------------------------------------------------------
-# FastAPI Logic
+# App
 # ----------------------------------------------------------------------
 
-app = FastAPI(title="TTS Audiobook Generator", description="Converts PDF/EPUB files to MP3 using Piper TTS.")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    init_db()
+    # Jobs that were running when the server stopped will never finish.
+    db = SessionLocal()
+    try:
+        for ab in db.query(AudioBook).filter(AudioBook.generation_status.in_(["pending", "processing"])).all():
+            ab.generation_status = "failed"
+            ab.error_message = "Server restarted during generation. Use /books/{id}/regenerate."
+        db.commit()
+    finally:
+        db.close()
+    get_cleaner()  # load the DNN once at start-up
+    yield
+    executor.shutdown(wait=False, cancel_futures=True)
 
-# This is the heavy-lifting function that runs in the background.
-def generate_audiobook_task(temp_filepath, base_output_name, speed, background_tasks):
-    """Core process that runs as a background task."""
-    print(f"Starting background task for: {temp_filepath}")
-    
-    # 1. Extract Text
-    text_content = extract_text_from_file(temp_filepath)
-    if text_content.startswith("Error"):
-        print(f"Extraction Error: {text_content}")
-        # We can't return an HTTP error from a background task, so we just log and clean up
-        Path(temp_filepath).unlink(missing_ok=True)
-        return
-        
-    # 2. Process & Merge
-    audio_chunks = process_text_in_chunks(text_content, base_output_name, speed=speed)
-    final_mp3_path = merge_audio_files(audio_chunks, base_output_name)
 
-    # 3. Add Cleanup to run *after* the file is served/downloaded
-    # We must delete both the temporary uploaded file and all chunks/final MP3
-    
-    # Add cleanup to the background_tasks queue. The cleanup will run AFTER
-    # the server is done sending the file response.
-    cleanup_list = audio_chunks
-    cleanup_list.append(Path(temp_filepath)) # Also clean up the uploaded file
-    
-    background_tasks.add_task(cleanup_files, cleanup_list, final_mp3_path)
-    
-    return final_mp3_path
+app = FastAPI(title="Bookshelf Audiobook Generator",
+              description="PDF/EPUB -> DNN text cleaning -> Piper neural TTS -> MP3",
+              lifespan=lifespan)
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=False,
+                   allow_methods=["*"], allow_headers=["*"])
+app.include_router(database_router)
+
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+
+async def _save_upload(file: UploadFile) -> Path:
+    suffix = Path(file.filename or "").suffix.lower()
+    if suffix not in ALLOWED_TYPES:
+        raise HTTPException(400, f"Unsupported file type '{suffix}'. Please upload a PDF or EPUB file.")
+    dest = UPLOAD_DIR / f"{uuid.uuid4().hex}{suffix}"
+    size = 0
+    with open(dest, "wb") as out:
+        while chunk := await file.read(1024 * 1024):
+            size += len(chunk)
+            if size > MAX_UPLOAD_MB * 1024 * 1024:
+                out.close()
+                dest.unlink(missing_ok=True)
+                raise HTTPException(413, f"File is larger than {MAX_UPLOAD_MB} MB.")
+            out.write(chunk)
+    if size == 0:
+        dest.unlink(missing_ok=True)
+        raise HTTPException(400, "Uploaded file is empty.")
+    return dest
+
+
+def _audiobook_json(ab: Optional[AudioBook]):
+    if ab is None:
+        return None
+    return {
+        "id": ab.id, "book_id": ab.book_id, "status": ab.generation_status,
+        "progress": ab.progress or 0.0, "stage": ab.stage, "error": ab.error_message,
+        "duration": ab.duration, "file_size": ab.file_size, "speaker_speed": ab.speaker_speed,
+        "voice": ab.voice,
+        "stream_url": f"/stream-audiobook/book/{ab.book_id}" if ab.generation_status == "completed" else None,
+        "created_at": ab.created_at.isoformat() if ab.created_at else None,
+    }
+
+
+def _book_json(book: Book):
+    return {
+        "id": book.id, "title": book.title, "author": book.author, "file_name": book.file_name,
+        "file_type": book.file_type, "file_size": book.file_size, "cover_image": book.cover_image,
+        "created_at": book.created_at.isoformat() if book.created_at else None,
+    }
+
+
+def _start_job(db: Session, book: Book, speed: float, voice: str) -> AudioBook:
+    audiobook = AudioBookService.get_audiobook_by_book_id(db, book.id)
+    if audiobook is None:
+        audiobook = AudioBookService.create_audiobook(db=db, book_id=book.id, file_name="", file_path="",
+                                                      speaker_speed=speed, file_size=0)
+    AudioBookService.update_audiobook(db, audiobook.id, generation_status="pending", progress=0.0,
+                                      stage="queued", speaker_speed=speed, voice=voice, error_message="")
+    executor.submit(process_audiobook_job, book.id, audiobook.id, book.file_path, speed, voice)
+    db.refresh(audiobook)
+    return audiobook
+
+
+@app.post("/upload-book/")
+async def upload_book(
+    file: UploadFile = File(...),
+    speed: float = Form(DEFAULT_SPEED),
+    voice: str = Form(DEFAULT_VOICE),
+    user_id: int = Form(1),
+    db: Session = Depends(get_db),
+):
+    """Upload a PDF/EPUB. Returns immediately; poll /audiobook-status/book/{id} for progress."""
+    path = await _save_upload(file)
+    try:
+        book = BookService.create_book(
+            db=db, title=Path(file.filename).stem, author="Unknown", file_name=file.filename,
+            file_type=path.suffix.lstrip("."), file_path=str(path), file_size=path.stat().st_size,
+        )
+        cover_path = COVER_DIR / f"book_{book.id}.png"
+        has_cover = await run_in_threadpool(extract_cover, str(path), str(cover_path))
+        cover = f"/books/{book.id}/cover" if has_cover else f"https://picsum.photos/seed/{book.id}/300/400"
+        BookService.update_book(db, book.id, cover_image=cover)
+        db.refresh(book)
+        audiobook = _start_job(db, book, speed, voice)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        log.exception("Upload failed")
+        path.unlink(missing_ok=True)
+        raise HTTPException(500, f"Internal Server Error: {exc}")
+
+    return JSONResponse({
+        "status": "success",
+        "message": "Book uploaded; audiobook generation started",
+        "book": _book_json(book),
+        "audiobook": _audiobook_json(audiobook),
+    })
+
+
+@app.get("/audiobook-status/book/{book_id}")
+def audiobook_status(book_id: int, db: Session = Depends(get_db)):
+    book = BookService.get_book(db, book_id)
+    if not book:
+        raise HTTPException(404, "Book not found")
+    return {"book": _book_json(book), "audiobook": _audiobook_json(AudioBookService.get_audiobook_by_book_id(db, book_id))}
+
+
+@app.post("/books/{book_id}/regenerate")
+def regenerate(book_id: int, speed: float = Form(DEFAULT_SPEED), voice: str = Form(DEFAULT_VOICE),
+               db: Session = Depends(get_db)):
+    """Re-run cleaning + narration (e.g. after re-training the cleaner or to change voice/speed)."""
+    book = BookService.get_book(db, book_id)
+    if not book or not book.file_path or not Path(book.file_path).is_file():
+        raise HTTPException(404, "Book or its source file not found")
+    ab = AudioBookService.get_audiobook_by_book_id(db, book_id)
+    if ab and ab.generation_status in ("pending", "processing"):
+        raise HTTPException(409, "Audiobook is already being generated")
+    return {"audiobook": _audiobook_json(_start_job(db, book, speed, voice))}
+
+
+@app.get("/stream-audiobook/book/{book_id}")
+def stream_audiobook_by_book(book_id: int, db: Session = Depends(get_db)):
+    """Streams the generated MP3 (supports HTTP Range requests for seeking)."""
+    audiobook = AudioBookService.get_audiobook_by_book_id(db=db, book_id=book_id)
+    if not audiobook:
+        raise HTTPException(404, "Audiobook not found for this book")
+    if audiobook.generation_status != "completed":
+        raise HTTPException(409, f"Audiobook is {audiobook.generation_status}")
+    audio_path = Path(audiobook.file_path or "")
+    if not audio_path.is_file():
+        raise HTTPException(404, "Audiobook file not found on server")
+    return FileResponse(str(audio_path), media_type="audio/mpeg", filename=audio_path.name)
+
+
+@app.get("/books/{book_id}/text", response_class=PlainTextResponse)
+def cleaned_text(book_id: int, db: Session = Depends(get_db)):
+    """The exact text that was read aloud (after the DNN removed page numbers, headers, ...)."""
+    ab = AudioBookService.get_audiobook_by_book_id(db, book_id)
+    path = Path(ab.text_path) if ab and ab.text_path else TEXT_DIR / f"book_{book_id}.txt"
+    if not path.is_file():
+        raise HTTPException(404, "Cleaned text not available yet")
+    return PlainTextResponse(path.read_text(encoding="utf-8"))
+
+
+@app.get("/books/{book_id}/cover")
+def book_cover(book_id: int):
+    path = COVER_DIR / f"book_{book_id}.png"
+    if not path.is_file():
+        raise HTTPException(404, "No cover")
+    return FileResponse(str(path))
+
+
+@app.delete("/books/{book_id}/full")
+def delete_book_full(book_id: int, db: Session = Depends(get_db)):
+    """Delete a book together with its audiobook, cleaned text, cover and source file."""
+    book = BookService.get_book(db, book_id)
+    if not book:
+        raise HTTPException(404, "Book not found")
+    ab = AudioBookService.get_audiobook_by_book_id(db, book_id)
+    if ab and ab.generation_status in ("pending", "processing"):
+        raise HTTPException(409, "Audiobook is still being generated")
+    for p in [book.file_path, ab and ab.file_path, ab and ab.text_path, str(COVER_DIR / f"book_{book_id}.png")]:
+        if p:
+            Path(p).unlink(missing_ok=True)
+    if ab:
+        AudioBookService.delete_audiobook(db, ab.id)
+    BookService.delete_book(db, book_id)
+    return {"status": "deleted"}
+
+
+@app.post("/preview-clean/")
+async def preview_clean(file: UploadFile = File(...), max_chars: int = Form(6000)):
+    """Debug endpoint: see what the DNN keeps / removes without generating audio."""
+    path = await _save_upload(file)
+    try:
+        def work():
+            doc = extract_document(str(path))
+            return doc, get_cleaner().clean(doc)
+        doc, result = await run_in_threadpool(work)
+    except ExtractionError as exc:
+        raise HTTPException(422, str(exc))
+    finally:
+        path.unlink(missing_ok=True)
+    text = result.text
+    return {
+        "cleaner": "dnn" if result.used_model else "heuristic (model not trained)",
+        "title": doc.title, "author": doc.author, "pages": len(doc.pages),
+        "label_counts": result.label_counts,
+        "removed_examples": result.removed_examples,
+        "paragraphs": len(result.paragraphs),
+        "characters": len(text),
+        "text_preview": text[:max_chars],
+    }
 
 
 @app.post("/generate-audiobook/")
-async def generate_audiobook(
-    background_tasks: BackgroundTasks,
-    file: UploadFile = File(...),
-    speed: float = DEFAULT_SPEED
-):
-    """
-    Uploads a PDF or EPUB file and starts a background task to convert it to an MP3 audiobook.
-    """
-    if AudioSegment is None:
-        raise HTTPException(
-            status_code=503,
-            detail="Server Misconfigured: pydub is not installed or FFmpeg is missing."
-        )
-
-    # Check file type
-    allowed_types = [".pdf", ".epub"]
-    file_suffix = Path(file.filename).suffix.lower()
-    if file_suffix not in allowed_types:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Unsupported file type. Please upload a PDF or EPUB file. Received: {file_suffix}"
-        )
-    
-    # 1. Save the uploaded file temporarily
-    TEMP_DIR.mkdir(exist_ok=True)
-    unique_id = int(time.time() * 1000) # Use timestamp for unique temporary name
-    temp_filepath = TEMP_DIR / f"{unique_id}_{file.filename}"
-
+async def generate_audiobook(background_tasks: BackgroundTasks, file: UploadFile = File(...),
+                             speed: float = Form(DEFAULT_SPEED), voice: str = Form(DEFAULT_VOICE)):
+    """Synchronous variant: upload and wait for the MP3 (only practical for short documents)."""
+    path = await _save_upload(file)
+    job = uuid.uuid4().hex
+    mp3 = TMP_DIR / f"{job}.mp3"
+    txt = TMP_DIR / f"{job}.txt"
     try:
-        # Read the file content and write it to a temporary location
-        content = await file.read()
-        with open(temp_filepath, "wb") as f:
-            f.write(content)
-            
-        base_output_name = Path(file.filename).stem
+        await run_in_threadpool(run_pipeline, path, mp3, txt, speed, voice)
+    except (ExtractionError, TTSError) as exc:
+        raise HTTPException(422, str(exc))
+    finally:
+        path.unlink(missing_ok=True)
+        txt.unlink(missing_ok=True)
+    background_tasks.add_task(lambda: mp3.unlink(missing_ok=True))
+    return FileResponse(str(mp3), media_type="audio/mpeg", filename=f"{Path(file.filename).stem}.mp3",
+                        background=background_tasks)
 
-        # 2. Run the heavy processing in a background thread
-        # NOTE: This is NOT a fire-and-forget task. It blocks the worker until done.
-        # For true async/non-blocking, you'd use a task queue like Celery.
-        # But for a single-request, file-processing app, this is a common, simple pattern.
-        
-        final_mp3_path = generate_audiobook_task(str(temp_filepath), base_output_name, speed, background_tasks)
-        
-        if final_mp3_path:
-            # 3. Return the final file using FileResponse.
-            # The cleanup task is automatically run AFTER this response is sent.
-            return FileResponse(
-                final_mp3_path,
-                media_type="audio/mpeg",
-                filename=Path(final_mp3_path).name
-            )
-        else:
-            raise HTTPException(
-                status_code=500,
-                detail="Audiobook generation failed. Check server logs for details."
-            )
-            
-    except Exception as e:
-        # If an error happens before cleanup is scheduled, ensure the temp upload is deleted
-        Path(temp_filepath).unlink(missing_ok=True)
-        print(f"Critical API Error: {e}")
-        raise HTTPException(status_code=500, detail=f"Internal Server Error: {e}")
+
+@app.get("/health")
+def health():
+    cleaner = get_cleaner()
+    return {
+        "status": "ok",
+        "cleaner": "dnn" if cleaner.available else "heuristic (run: python -m ai.train)",
+        "tts_backend": TTS_BACKEND,
+        "default_voice": DEFAULT_VOICE,
+        "ffmpeg": shutil.which("ffmpeg") is not None,
+    }
 
 
 @app.get("/")
 def read_root():
-    return JSONResponse(content={"message": "TTS Audiobook Generator API. Use /generate-audiobook to upload and process a file."})
+    return {"message": "Bookshelf Audiobook API. POST a PDF/EPUB to /upload-book/ then poll "
+                       "/audiobook-status/book/{id}. Docs at /docs."}

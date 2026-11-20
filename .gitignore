@@ -1,4 +1,15 @@
 /UI/.expo
 /Backend/venv
+/Backend/storage/
+/Backend/voices/
+/Backend/temp_processing/
+/Backend/ai/data/
+.env
+.env.*
+*.env
+Backend/.env*
+__pycache__/
+*.pyc
 UI/node_modules/
 .DS_Store
+Backend/venv_broken_old
