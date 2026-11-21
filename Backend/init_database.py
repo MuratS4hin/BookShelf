@@ -5,6 +5,7 @@ Database initialization and seeding script for BookShelf application.
 
 import os
 from pathlib import Path
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 from database import SessionLocal, init_db, Voice
 from database.services import VoiceService
@@ -69,7 +70,7 @@ def verify_database():
         db = SessionLocal()
         
         # Test connection
-        db.execute("SELECT 1")
+        db.execute(text("SELECT 1"))
         print("✅ Database connection successful!")
         
         # Count records in each table

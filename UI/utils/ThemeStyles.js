@@ -1,41 +1,59 @@
-import { StyleSheet, Dimensions } from 'react-native';
+import {
+  Spacing,
+  Radii,
+  Typography,
+  Motion,
+  LightColors,
+  DarkColors,
+  useHIGTheme,
+  useReducedMotion,
+  getChromeMaterialStyle,
+  getLayoutMetrics,
+  getWebFocusRingStyle,
+  continuousCurve,
+} from '../theme/hig';
 
-// Tema Renkleri
-export const Colors = {
-    // Ana Tema
-    primary: '#1193d4',
-    secondaryPrimary: '#FF9800', // Sesli Kitap Sayfası için özel renk
-    backgroundLight: '#f6f7f8',
-    backgroundDark: '#101c22',
-
-    // Metin ve Gray Tonları
-    textLight: '#f6f7f8',
-    textDark: '#101c22',
-    slate800: '#1f2937', // koyu mod başlık
-    slate900: '#0f172a', // koyu mod başlık
-    slate700: '#334155',
-    slate100: '#f1f5f9', // açık mod metin
-    slate200: '#e2e8f0',
-    slate300: '#cbd5e1', // açık mod metin
-    slate400: '#94a3b8', // gri metin
-    slate500: '#64748b', // gri metin
-    slate600: '#475569', // gri metin
+export {
+  Spacing,
+  Radii,
+  Typography,
+  Motion,
+  LightColors,
+  DarkColors,
+  useHIGTheme,
+  useReducedMotion,
+  getChromeMaterialStyle,
+  getLayoutMetrics,
+  getWebFocusRingStyle,
+  continuousCurve,
 };
 
-// Ortak Stil Fonksiyonu
-export const getThemeStyles = (colorScheme) => ({
+export const Colors = {
+  primary: LightColors.accent,
+  primaryDark: DarkColors.accent,
+  backgroundLight: LightColors.surfaceGroupedCanvas,
+  backgroundDark: DarkColors.surfaceGroupedCanvas,
+  surfaceLight: LightColors.surfaceCard,
+  surfaceDark: DarkColors.surfaceCard,
+  textLight: DarkColors.labelPrimary,
+  textDark: LightColors.labelPrimary,
+};
+
+export const getThemeStyles = (colorScheme) => {
+  const palette = colorScheme === 'dark' ? DarkColors : LightColors;
+  return {
     container: {
-        flex: 1,
-        backgroundColor: colorScheme === 'dark' ? Colors.backgroundDark : Colors.backgroundLight,
+      flex: 1,
+      backgroundColor: palette.surfaceGroupedCanvas,
     },
     headerBackground: {
-        backgroundColor: colorScheme === 'dark' ? 'rgba(16, 28, 34, 0.8)' : 'rgba(246, 247, 248, 0.8)',
-        // RN'de backdrop-filter yerine blurRadius kullanılır, ancak basitçe arka planı kullanıyorum.
+      backgroundColor: palette.chromeMaterialNative,
     },
     textPrimary: {
-        color: colorScheme === 'dark' ? Colors.textLight : Colors.textDark,
+      color: palette.labelPrimary,
     },
     textSecondary: {
-        color: colorScheme === 'dark' ? Colors.slate400 : Colors.slate600,
+      color: palette.labelSecondary,
     },
-});
+  };
+};

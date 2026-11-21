@@ -1,32 +1,47 @@
-import React, { useEffect, useState } from 'react';
-import { NavigationContainer } from '@react-navigation/native';
+import React, { useMemo } from 'react';
+import { DarkTheme, DefaultTheme, NavigationContainer } from '@react-navigation/native';
+import { StatusBar } from 'expo-status-bar';
+import { GestureHandlerRootView } from 'react-native-gesture-handler';
+import { SafeAreaProvider } from 'react-native-safe-area-context';
 import AppNavigator from './navigation/AppNavigator';
-import { ActivityIndicator, View } from 'react-native';
+import { useHIGTheme } from './theme/hig';
 
-export default function App() {
-  const [loading, setLoading] = useState(true);
+function AppContent() {
+  const theme = useHIGTheme();
 
-  useEffect(() => {
-    const init = async () => {
-      // Real-world setup would include async tasks like asset loading or user authentication checks
-      await new Promise(resolve => setTimeout(resolve, 1000)); // Simulate a delay
-      setLoading(false);
+  const navigationTheme = useMemo(() => {
+    const base = theme.isDark ? DarkTheme : DefaultTheme;
+    return {
+      ...base,
+      dark: theme.isDark,
+      colors: {
+        ...base.colors,
+        primary: theme.colors.accent,
+        background: theme.colors.surfaceGroupedCanvas,
+        card: theme.colors.surfaceCard,
+        text: theme.colors.labelPrimary,
+        border: theme.colors.separator,
+        notification: theme.colors.destructive,
+      },
     };
-
-    init();
-  }, []);
-
-  if (loading) {
-    return (
-      <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
-        <ActivityIndicator size="large" color="#1193d4" />
-      </View>
-    );
-  }
+  }, [theme]);
 
   return (
-    <NavigationContainer>
-      <AppNavigator />
-    </NavigationContainer>
+    <>
+      <StatusBar style={theme.isDark ? 'light' : 'dark'} />
+      <NavigationContainer theme={navigationTheme}>
+        <AppNavigator />
+      </NavigationContainer>
+    </>
+  );
+}
+
+export default function App() {
+  return (
+    <GestureHandlerRootView style={{ flex: 1 }}>
+      <SafeAreaProvider>
+        <AppContent />
+      </SafeAreaProvider>
+    </GestureHandlerRootView>
   );
 }

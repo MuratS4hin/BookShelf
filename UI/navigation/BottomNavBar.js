@@ -1,76 +1,282 @@
-// components/BottomTabBar.js
-
 import React from 'react';
-import { View, Text, TouchableOpacity, StyleSheet, useColorScheme } from 'react-native';
-import { MaterialIcons, Feather } from '@expo/vector-icons';
-import { Colors, getThemeStyles } from '../utils/ThemeStyles';
+import { StyleSheet, Text, View } from 'react-native';
+import { Ionicons } from '@expo/vector-icons';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import PressableScale from '../components/hig/PressableScale';
+import useAppStore from '../store/UseAppStore';
+import {
+  continuousCurve,
+  getChromeMaterialStyle,
+  Radii,
+  Spacing,
+  Typography,
+  useHIGTheme,
+} from '../theme/hig';
 
-const BottomNavBar = ({ navigation, currentRouteName }) => {
-  const colorScheme = useColorScheme();
-  const isDark = colorScheme === 'dark';
-  const themeStyles = getThemeStyles(colorScheme);
+export const TABS = [
+  {
+    name: 'HomeStack',
+    label: 'Home',
+    iconOutline: 'home-outline',
+    iconFilled: 'home',
+  },
+  {
+    name: 'LibraryStack',
+    label: 'Library',
+    iconOutline: 'library-outline',
+    iconFilled: 'library',
+  },
+  {
+    name: 'SettingsStack',
+    label: 'Settings',
+    iconOutline: 'settings-outline',
+    iconFilled: 'settings',
+  },
+];
 
-  // Sekme verileri
-  const tabs = [
-    { name:'Home', nameStack: 'HomeStack', icon: 'home', route: 'HomeStack', iconLib: MaterialIcons },
-    { name:'Library', nameStack: 'LibraryStack', icon: 'book', route: 'LibraryStack', iconLib: MaterialIcons },
-     { name:'Settings', nameStack: 'SettingsStack', icon: 'settings', route: 'SettingsStack', iconLib: MaterialIcons },
-  ];
+/**
+ * Compact viewport bottom tab bar with translucent material and 48px+ touch targets.
+ */
+export default function BottomNavBar({ navigation, currentRouteName, onSelectRoute }) {
+  const theme = useHIGTheme();
+  const insets = useSafeAreaInsets();
 
-  const styles = StyleSheet.create({
-    footer: {
-      borderTopWidth: 1,
-      borderColor: Colors.slate500, // Home/Settings'teki sınırları kullan
-      ...themeStyles.headerBackground,
-      paddingTop: 8,
-      paddingBottom: 4, 
-    },
-    navBar: {
-      flexDirection: 'row',
-      justifyContent: 'space-around',
-    },
-    navItem: {
-      flexDirection: 'column',
-      alignItems: 'center',
-      justifyContent: 'center',
-      width: 96,
-      gap: 4,
-      paddingVertical: 4
-    },
-    activeColor: Colors.primary,
-    inactiveColor: isDark ? Colors.slate200 : Colors.slate500,
-  });
+  const handlePress = (routeName) => {
+    if (onSelectRoute) {
+      onSelectRoute(routeName);
+    } else {
+      navigation?.navigate(routeName);
+    }
+  };
 
   return (
-    <View style={styles.footer}>
+    <View
+      accessibilityRole="tablist"
+      style={[
+        styles.footer,
+        getChromeMaterialStyle(theme),
+        {
+          borderTopColor: theme.colors.chromeBorder,
+          paddingBottom: Math.max(insets.bottom, Spacing.sm),
+        },
+      ]}
+    >
       <View style={styles.navBar}>
-        {tabs.map((tab) => {
-          const isActive = currentRouteName === tab.nameStack;
-          const iconColor = isActive ? styles.activeColor : styles.inactiveColor;
-          const IconComponent = tab.iconLib;
+        {TABS.map((tab) => {
+          const isActive = currentRouteName === tab.name;
+          const tint = isActive ? theme.colors.accent : theme.colors.labelSecondary;
 
           return (
-            <TouchableOpacity 
+            <PressableScale
               key={tab.name}
-              style={styles.navItem} 
-              onPress={() => navigation.navigate(tab.route)}
+              style={styles.navItem}
+              onPress={() => handlePress(tab.name)}
+              accessibilityRole="tab"
+              accessibilityLabel={tab.label}
+              accessibilityState={{ selected: isActive }}
             >
-              <IconComponent name={tab.icon} size={24} color={iconColor} />
-              <Text 
-                style={{ 
-                  fontSize: 12, 
-                  fontWeight: '500', 
-                  color: iconColor 
-                }}
+              <Ionicons
+                name={isActive ? tab.iconFilled : tab.iconOutline}
+                size={24}
+                color={tint}
+              />
+              <Text
+                numberOfLines={1}
+                style={[
+                  Typography.caption,
+                  {
+                    fontWeight: isActive ? '600' : '500',
+                    color: tint,
+                  },
+                ]}
               >
-                {tab.name}
+                {tab.label}
               </Text>
-            </TouchableOpacity>
+            </PressableScale>
           );
         })}
       </View>
     </View>
   );
-};
+}
 
-export default BottomNavBar;
+/**
+ * Regular/wide viewport translucent sidebar navigation (iPadOS / macOS / Desktop Web).
+ */
+export function SidebarNav({ navigation, currentRouteName, onSelectRoute }) {
+  const theme = useHIGTheme();
+  const insets = useSafeAreaInsets();
+  const bookCount = useAppStore((state) => state.audiobooks.length);
+  const [browseExpanded, setBrowseExpanded] = React.useState(true);
+
+  const handlePress = (routeName) => {
+    if (onSelectRoute) {
+      onSelectRoute(routeName);
+    } else {
+      navigation?.navigate(routeName);
+    }
+  };
+
+  return (
+    <View
+      accessibilityRole="navigation"
+      style={[
+        styles.sidebar,
+        getChromeMaterialStyle(theme),
+        {
+          borderRightColor: theme.colors.chromeBorder,
+          paddingTop: insets.top + Spacing.lg,
+          paddingBottom: Math.max(insets.bottom, Spacing.base),
+        },
+      ]}
+    >
+      <Text
+        accessibilityRole="header"
+        style={[
+          Typography.title2,
+          {
+            color: theme.colors.labelPrimary,
+            paddingHorizontal: Spacing.md,
+            marginBottom: Spacing.lg,
+          },
+        ]}
+      >
+        Bookshelf
+      </Text>
+
+      <PressableScale
+        onPress={() => setBrowseExpanded((prev) => !prev)}
+        accessibilityRole="button"
+        accessibilityLabel="Browse section"
+        accessibilityState={{ expanded: browseExpanded }}
+        style={styles.sectionToggle}
+      >
+        <Text
+          style={[
+            Typography.footnote,
+            {
+              fontWeight: '600',
+              color: theme.colors.labelSecondary,
+              letterSpacing: 0.3,
+            },
+          ]}
+        >
+          Browse
+        </Text>
+        <Ionicons
+          name={browseExpanded ? 'chevron-down' : 'chevron-forward'}
+          size={16}
+          color={theme.colors.labelSecondary}
+        />
+      </PressableScale>
+
+      {browseExpanded && (
+        <View style={styles.sidebarList}>
+          {TABS.map((tab) => {
+            const isActive = currentRouteName === tab.name;
+            const iconColor = isActive ? theme.colors.accent : theme.colors.labelSecondary;
+            const textColor = isActive ? theme.colors.accent : theme.colors.labelPrimary;
+
+            return (
+              <PressableScale
+                key={tab.name}
+                onPress={() => handlePress(tab.name)}
+                accessibilityRole="tab"
+                accessibilityLabel={tab.label}
+                accessibilityState={{ selected: isActive }}
+                style={[
+                  styles.sidebarItem,
+                  continuousCurve,
+                  {
+                    backgroundColor: isActive ? theme.colors.accentTint : 'transparent',
+                  },
+                ]}
+              >
+                <Ionicons
+                  name={isActive ? tab.iconFilled : tab.iconOutline}
+                  size={20}
+                  color={iconColor}
+                />
+                <Text
+                  style={[
+                    Typography.subheadline,
+                    {
+                      flex: 1,
+                      fontWeight: isActive ? '600' : '500',
+                      color: textColor,
+                    },
+                  ]}
+                  numberOfLines={1}
+                >
+                  {tab.label}
+                </Text>
+                {tab.name === 'LibraryStack' && bookCount > 0 && (
+                  <Text
+                    style={[
+                      Typography.footnote,
+                      Typography.tabularNums,
+                      {
+                        fontWeight: '600',
+                        color: isActive ? theme.colors.accent : theme.colors.labelSecondary,
+                      },
+                    ]}
+                  >
+                    {bookCount}
+                  </Text>
+                )}
+              </PressableScale>
+            );
+          })}
+        </View>
+      )}
+    </View>
+  );
+}
+
+const styles = StyleSheet.create({
+  footer: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    bottom: 0,
+    zIndex: 30,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    paddingTop: Spacing.sm,
+  },
+  navBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-around',
+  },
+  navItem: {
+    flex: 1,
+    minHeight: 48,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: Spacing.xs,
+    paddingVertical: Spacing.xs,
+  },
+  sidebar: {
+    width: 260,
+    borderRightWidth: StyleSheet.hairlineWidth,
+    paddingHorizontal: Spacing.md,
+  },
+  sectionToggle: {
+    minHeight: 44,
+    paddingHorizontal: Spacing.md,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  sidebarList: {
+    gap: Spacing.xs,
+  },
+  sidebarItem: {
+    minHeight: 44,
+    borderRadius: Radii.pillItem,
+    paddingHorizontal: Spacing.md,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.md,
+  },
+});

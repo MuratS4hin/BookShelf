@@ -83,6 +83,21 @@ export default class ApiService {
     return response.text();
   }
 
+  static async deleteBook(bookId, baseUrlOverride = null) {
+    const base = (baseUrlOverride || this.getBaseUrl()).replace(/\/+$/, '');
+    const response = await fetch(`${base}/books/${bookId}/full`, {
+      method: 'DELETE',
+    });
+    if (response.status === 404) {
+      return { status: 'not_found' };
+    }
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(data.detail || `Delete failed (${response.status})`);
+    }
+    return data;
+  }
+
   static getStreamUrl(bookId, baseUrlOverride = null) {
     const base = (baseUrlOverride || this.getBaseUrl()).replace(/\/+$/, '');
     return `${base}/stream-audiobook/book/${bookId}`;

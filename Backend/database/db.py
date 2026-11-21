@@ -15,6 +15,10 @@ except ImportError:
 # Without it a local SQLite file is used so the app works out of the box.
 _DEFAULT_SQLITE = f"sqlite:///{Path(__file__).resolve().parent.parent / 'storage' / 'bookshelf.db'}"
 DATABASE_URL = os.getenv("DATABASE_URL") or _DEFAULT_SQLITE
+if DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql+psycopg2://", 1)
+elif DATABASE_URL.startswith("postgresql://"):
+    DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+psycopg2://", 1)
 
 if DATABASE_URL.startswith("sqlite"):
     Path(DATABASE_URL.replace("sqlite:///", "")).parent.mkdir(parents=True, exist_ok=True)

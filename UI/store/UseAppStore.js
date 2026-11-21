@@ -5,9 +5,11 @@ import ApiService from '../services/ApiService';
 
 const useAppStore = create(
   persist(
-    (set, get) => ({
+    (set) => ({
       audiobooks: [],
       serverUrl: 'http://localhost:5002',
+      themePreference: 'system', // 'system' | 'light' | 'dark'
+      defaultNarrationSpeed: 1.0,
       tempData: {},
 
       setServerUrl: (url) => {
@@ -15,6 +17,10 @@ const useAppStore = create(
         ApiService.setBaseUrl(cleaned);
         set({ serverUrl: cleaned });
       },
+
+      setThemePreference: (themePreference) => set({ themePreference }),
+
+      setDefaultNarrationSpeed: (defaultNarrationSpeed) => set({ defaultNarrationSpeed }),
 
       setTempData: (data) =>
         set((state) => ({
@@ -25,7 +31,10 @@ const useAppStore = create(
 
       addAudiobook: (newBook) =>
         set((state) => ({
-          audiobooks: [newBook, ...state.audiobooks.filter((b) => String(b.id) !== String(newBook.id))],
+          audiobooks: [
+            newBook,
+            ...state.audiobooks.filter((b) => String(b.id) !== String(newBook.id)),
+          ],
         })),
 
       updateAudiobook: (id, patch) =>
@@ -39,6 +48,8 @@ const useAppStore = create(
         set((state) => ({
           audiobooks: state.audiobooks.filter((b) => String(b.id) !== String(id)),
         })),
+
+      clearAudiobooks: () => set({ audiobooks: [] }),
     }),
     {
       name: 'audiobook-storage',

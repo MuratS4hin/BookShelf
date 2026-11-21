@@ -1,141 +1,366 @@
 import React, { useState } from 'react';
-import {
-  View,
-  Text,
-  TextInput,
-  TouchableOpacity,
-  ScrollView,
-  Switch,
-  SafeAreaView,
-  StyleSheet,
-  useColorScheme,
-  Alert,
-} from 'react-native';
-import { Colors, getThemeStyles } from '../utils/ThemeStyles';
-import BottomTabBar from '../navigation/BottomNavBar';
-import useAppStore from '../store/UseAppStore';
+import { Alert, Platform, StyleSheet, Text, TextInput, View } from 'react-native';
+import { Ionicons } from '@expo/vector-icons';
+import HIGButton from '../components/hig/HIGButton';
+import { HIGGroupedRow, HIGGroupedSection } from '../components/hig/HIGGroupedSection';
+import HIGScreen from '../components/hig/HIGScreen';
+import HIGSegmentedControl from '../components/hig/HIGSegmentedControl';
+import PressableScale from '../components/hig/PressableScale';
 import ApiService from '../services/ApiService';
+import useAppStore from '../store/UseAppStore';
+import {
+  continuousCurve,
+  getWebFocusRingStyle,
+  Radii,
+  Spacing,
+  Typography,
+  useHIGTheme,
+  webInputResetStyle,
+} from '../theme/hig';
+import { confirmAction } from '../utils/helpers';
 
-const SettingsScreen = ({ navigation }) => {
-  const colorScheme = useColorScheme();
-  const themeStyles = getThemeStyles(colorScheme);
-  const isDark = colorScheme === 'dark';
+const THEME_OPTIONS = [
+  { value: 'system', label: 'System' },
+  { value: 'light', label: 'Light' },
+  { value: 'dark', label: 'Dark' },
+];
 
-  const [isDarkModeEnabled, setIsDarkModeEnabled] = useState(isDark);
+const SPEED_OPTIONS = [
+  { value: 0.75, label: '0.75x' },
+  { value: 1.0, label: '1.0x' },
+  { value: 1.25, label: '1.25x' },
+  { value: 1.5, label: '1.5x' },
+];
+
+export default function SettingsScreen() {
+  const theme = useHIGTheme();
+
   const serverUrl = useAppStore((state) => state.serverUrl);
   const setServerUrl = useAppStore((state) => state.setServerUrl);
-  const [urlInput, setUrlInput] = useState(serverUrl);
-  const [healthInfo, setHealthInfo] = useState(null);
+  const themePreference = useAppStore((state) => state.themePreference);
+  const setThemePreference = useAppStore((state) => state.setThemePreference);
+  const defaultNarrationSpeed = useAppStore((state) => state.defaultNarrationSpeed);
+  const setDefaultNarrationSpeed = useAppStore((state) => state.setDefaultNarrationSpeed);
+  const audiobooks = useAppStore((state) => state.audiobooks);
+  const clearAudiobooks = useAppStore((state) => state.clearAudiobooks);
 
-  const toggleDarkMode = () => {
-    setIsDarkModeEnabled((previousState) => !previousState);
-  };
+  const [urlInput, setUrlInput] = useState(serverUrl);
+  const [urlFocused, setUrlFocused] = useState(false);
+  const [connectionState, setConnectionState] = useState('idle'); // 'idle' | 'testing' | 'connected' | 'error'
+  const [healthInfo, setHealthInfo] = useState(null);
+  const [errorMessage, setErrorMessage] = useState('');
 
   const handleSaveAndTestServer = async () => {
     const cleaned = (urlInput || 'http://localhost:5002').trim().replace(/\/+$/, '');
+    setUrlInput(cleaned);
     setServerUrl(cleaned);
+    setConnectionState('testing');
+    setErrorMessage('');
+
     try {
       const info = await ApiService.getHealth(cleaned);
       setHealthInfo(info);
+      setConnectionState('connected');
       Alert.alert(
         'Connected to Backend',
-        `Cleaner: ${info.cleaner}\nTTS: ${info.tts_backend} (${info.default_voice})\nFFmpeg: ${info.ffmpeg ? 'Ready' : 'Missing'}`
+        `Cleaner: ${info.cleaner}\nTTS: ${info.tts_backend} (${info.default_voice})\nFFmpeg: ${
+          info.ffmpeg ? 'Ready' : 'Missing'
+        }`
       );
     } catch (err) {
       setHealthInfo(null);
-      Alert.alert('Connection Failed', `Could not reach ${cleaned}/health: ${err.message}`);
+      setConnectionState('error');
+      setErrorMessage(err.message || 'Connection failed');
+      Alert.alert(
+        'Connection Failed',
+        `Could not reach ${cleaned}/health: ${err.message}`
+      );
     }
   };
 
-  const styles = StyleSheet.create({
-    sectionHeader: {
-      marginBottom: 12,
-      marginTop: 16,
-      fontSize: 18,
-      fontWeight: 'bold',
-      color: isDark ? 'white' : Colors.slate900,
-    },
-    listGroup: {
-      borderRadius: 8,
-      backgroundColor: isDark ? 'rgba(0, 0, 0, 0.2)' : 'rgba(255, 255, 255, 0.7)',
-      overflow: 'hidden',
-      padding: 12,
-      gap: 10,
-    },
-    listItem: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      justifyContent: 'space-between',
-      paddingVertical: 4,
-    },
-    listItemText: {
-      fontSize: 16,
-      color: isDark ? Colors.slate200 : Colors.slate800,
-    },
-    input: {
-      borderWidth: 1,
-      borderColor: isDark ? Colors.slate700 : Colors.slate300,
-      borderRadius: 8,
-      paddingHorizontal: 12,
-      paddingVertical: 10,
-      color: isDark ? 'white' : Colors.slate900,
-      fontSize: 14,
-    },
-    button: {
-      backgroundColor: Colors.primary,
-      borderRadius: 8,
-      paddingVertical: 10,
-      alignItems: 'center',
-    },
-    mainContent: {
-      paddingHorizontal: 20,
-      flexGrow: 1,
-    },
-  });
+  const handleClearShelf = () => {
+    confirmAction(
+      'Clear Local Shelf',
+      'Remove all saved books from this device? Files stored on the backend server will remain untouched.',
+      clearAudiobooks,
+      'Clear'
+    );
+  };
+
+  const statusDotColor = {
+    connected: theme.colors.success,
+    error: theme.colors.destructive,
+    testing: theme.colors.warning,
+    idle: theme.colors.labelTertiary,
+  }[connectionState];
+
+  const statusText =
+    connectionState === 'connected' && healthInfo
+      ? `Connected · ${healthInfo.cleaner} · ${healthInfo.default_voice}`
+      : connectionState === 'error'
+      ? `Unreachable · ${errorMessage}`
+      : connectionState === 'testing'
+      ? 'Testing connection…'
+      : 'Not tested yet';
 
   return (
-    <SafeAreaView style={themeStyles.container}>
-      <ScrollView contentContainerStyle={styles.mainContent}>
-        <Text style={styles.sectionHeader}>Appearance</Text>
-        <View style={styles.listGroup}>
-          <View style={styles.listItem}>
-            <Text style={styles.listItemText}>Dark Mode</Text>
-            <Switch
-              trackColor={{ false: Colors.slate500, true: Colors.primary }}
-              thumbColor={'#ffffff'}
-              onValueChange={toggleDarkMode}
-              value={isDarkModeEnabled}
-            />
-          </View>
-        </View>
+    <HIGScreen title="Settings">
+      <View style={styles.sectionsStack}>
+        <HIGGroupedSection
+          title="Appearance"
+          footer="System automatically matches your device's Light or Dark mode."
+        >
+          <HIGGroupedRow showDivider={false}>
+            <View style={styles.controlBlock}>
+              <View style={styles.rowHeader}>
+                <View
+                  style={[
+                    styles.iconBadge,
+                    continuousCurve,
+                    { backgroundColor: theme.colors.accentTint },
+                  ]}
+                >
+                  <Ionicons name="contrast-outline" size={18} color={theme.colors.accent} />
+                </View>
+                <Text style={[Typography.headline, { color: theme.colors.labelPrimary }]}>
+                  Theme
+                </Text>
+              </View>
 
-        <Text style={styles.sectionHeader}>AI Backend Server</Text>
-        <View style={styles.listGroup}>
-          <Text style={{ fontSize: 12, color: isDark ? Colors.slate400 : Colors.slate600 }}>
-            FastAPI Server URL (use http://localhost:5002 on simulator/web or your Mac LAN IP on a phone)
-          </Text>
-          <TextInput
-            style={styles.input}
-            value={urlInput}
-            onChangeText={setUrlInput}
-            autoCapitalize="none"
-            autoCorrect={false}
-            placeholder="http://localhost:5002"
+              <HIGSegmentedControl
+                options={THEME_OPTIONS}
+                value={themePreference}
+                onChange={setThemePreference}
+                accessibilityLabel="App appearance"
+              />
+            </View>
+          </HIGGroupedRow>
+        </HIGGroupedSection>
+
+        <HIGGroupedSection
+          title="Narration"
+          footer="Default speed applied when generating new audiobooks."
+        >
+          <HIGGroupedRow showDivider={false}>
+            <View style={styles.controlBlock}>
+              <View style={styles.rowHeader}>
+                <View
+                  style={[
+                    styles.iconBadge,
+                    continuousCurve,
+                    { backgroundColor: theme.colors.accentTint },
+                  ]}
+                >
+                  <Ionicons name="speedometer-outline" size={18} color={theme.colors.accent} />
+                </View>
+                <Text style={[Typography.headline, { color: theme.colors.labelPrimary }]}>
+                  Default Speed
+                </Text>
+              </View>
+
+              <HIGSegmentedControl
+                tabular
+                options={SPEED_OPTIONS}
+                value={defaultNarrationSpeed}
+                onChange={setDefaultNarrationSpeed}
+                accessibilityLabel="Default narration speed"
+              />
+            </View>
+          </HIGGroupedRow>
+        </HIGGroupedSection>
+
+        <View>
+          <HIGGroupedSection
+            title="AI Backend Server"
+            footer="Use http://localhost:5002 on simulator or web, or your computer's LAN IP on a phone."
+          >
+            <HIGGroupedRow showDivider dividerInset={16}>
+              <View style={styles.inputRow}>
+                <Text
+                  style={[Typography.footnote, { color: theme.colors.labelSecondary }]}
+                >
+                  Server URL
+                </Text>
+                <TextInput
+                  style={[
+                    styles.urlInput,
+                    {
+                      fontFamily: Typography.monoFontFamily,
+                      color: theme.colors.labelPrimary,
+                    },
+                    urlFocused
+                      ? getWebFocusRingStyle(theme.colors.accent, true)
+                      : webInputResetStyle,
+                  ]}
+                  value={urlInput}
+                  onChangeText={setUrlInput}
+                  onFocus={() => setUrlFocused(true)}
+                  onBlur={() => setUrlFocused(false)}
+                  autoCapitalize="none"
+                  autoCorrect={false}
+                  keyboardType="url"
+                  keyboardAppearance={theme.colorScheme}
+                  placeholder="http://localhost:5002"
+                  placeholderTextColor={theme.colors.labelTertiary}
+                  accessibilityLabel="FastAPI Server URL"
+                />
+              </View>
+            </HIGGroupedRow>
+
+            <HIGGroupedRow showDivider={false}>
+              <View style={styles.statusRow}>
+                <View
+                  style={[styles.statusDot, { backgroundColor: statusDotColor }]}
+                />
+                <Text
+                  style={[
+                    Typography.footnote,
+                    {
+                      flex: 1,
+                      color:
+                        connectionState === 'error'
+                          ? theme.colors.destructive
+                          : connectionState === 'connected'
+                          ? theme.colors.labelPrimary
+                          : theme.colors.labelSecondary,
+                    },
+                  ]}
+                >
+                  {statusText}
+                </Text>
+              </View>
+            </HIGGroupedRow>
+          </HIGGroupedSection>
+
+          <HIGButton
+            variant="primary"
+            fullWidth
+            loading={connectionState === 'testing'}
+            title={
+              connectionState === 'testing'
+                ? 'Testing Connection…'
+                : 'Save & Test Connection'
+            }
+            onPress={handleSaveAndTestServer}
+            style={styles.testButton}
           />
-          <TouchableOpacity style={styles.button} onPress={handleSaveAndTestServer}>
-            <Text style={{ color: 'white', fontWeight: 'bold' }}>Save & Test Connection</Text>
-          </TouchableOpacity>
-          {healthInfo && (
-            <Text style={{ fontSize: 12, color: Colors.primary }}>
-              Active: Cleaner={healthInfo.cleaner} | Voice={healthInfo.default_voice}
-            </Text>
-          )}
         </View>
-      </ScrollView>
 
-      <BottomTabBar navigation={navigation} currentRouteName="SettingsStack" />
-    </SafeAreaView>
+        <HIGGroupedSection title="About">
+          <HIGGroupedRow showDivider dividerInset={16}>
+            <View style={styles.keyValueRow}>
+              <Text style={[Typography.body, { color: theme.colors.labelPrimary }]}>
+                Version
+              </Text>
+              <Text
+                style={[
+                  Typography.body,
+                  Typography.tabularNums,
+                  { color: theme.colors.labelSecondary },
+                ]}
+              >
+                1.0.0
+              </Text>
+            </View>
+          </HIGGroupedRow>
+
+          <HIGGroupedRow showDivider={audiobooks.length > 0} dividerInset={16}>
+            <View style={styles.keyValueRow}>
+              <Text style={[Typography.body, { color: theme.colors.labelPrimary }]}>
+                Saved Books
+              </Text>
+              <Text
+                style={[
+                  Typography.body,
+                  Typography.tabularNums,
+                  { color: theme.colors.labelSecondary },
+                ]}
+              >
+                {audiobooks.length}
+              </Text>
+            </View>
+          </HIGGroupedRow>
+
+          {audiobooks.length > 0 && (
+            <HIGGroupedRow showDivider={false}>
+              <PressableScale
+                onPress={handleClearShelf}
+                accessibilityLabel="Clear local shelf"
+                style={styles.destructiveRow}
+              >
+                <Text
+                  style={[Typography.body, { color: theme.colors.destructive }]}
+                >
+                  Clear Local Shelf
+                </Text>
+              </PressableScale>
+            </HIGGroupedRow>
+          )}
+        </HIGGroupedSection>
+      </View>
+    </HIGScreen>
   );
-};
+}
 
-export default SettingsScreen;
+const styles = StyleSheet.create({
+  sectionsStack: {
+    gap: Spacing.xl,
+  },
+  controlBlock: {
+    padding: Spacing.base,
+    gap: Spacing.md,
+  },
+  rowHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.md,
+  },
+  iconBadge: {
+    width: 32,
+    height: 32,
+    borderRadius: Radii.pillItem,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  inputRow: {
+    paddingHorizontal: Spacing.base,
+    paddingTop: Spacing.md,
+    paddingBottom: Spacing.sm,
+    gap: Spacing.xs,
+  },
+  urlInput: {
+    minHeight: 44,
+    fontSize: 15,
+    paddingVertical: Spacing.sm,
+    borderRadius: Radii.pillItem,
+  },
+  statusRow: {
+    minHeight: 44,
+    paddingHorizontal: Spacing.base,
+    paddingVertical: Spacing.md,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.sm,
+  },
+  statusDot: {
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+  },
+  testButton: {
+    marginTop: Spacing.md,
+  },
+  keyValueRow: {
+    minHeight: 48,
+    paddingHorizontal: Spacing.base,
+    paddingVertical: Spacing.md,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  destructiveRow: {
+    minHeight: 48,
+    paddingHorizontal: Spacing.base,
+    justifyContent: 'center',
+  },
+});
