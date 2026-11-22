@@ -1,16 +1,37 @@
-import { create } from 'zustand';
-import { persist, createJSONStorage } from 'zustand/middleware';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { create } from 'zustand';
+import { createJSONStorage, persist } from 'zustand/middleware';
 import ApiService from '../services/ApiService';
 
 const useAppStore = create(
   persist(
     (set) => ({
+      user: null,
+      authToken: null,
+      hasHydrated: false,
+
       audiobooks: [],
       serverUrl: 'http://localhost:5002',
       themePreference: 'system', // 'system' | 'light' | 'dark'
       defaultNarrationSpeed: 1.0,
       tempData: {},
+
+      setHasHydrated: (hasHydrated) => set({ hasHydrated }),
+
+      setAuthSession: (user, authToken) => {
+        ApiService.setToken(authToken || null);
+        set({ user: user || null, authToken: authToken || null });
+      },
+
+      updateUser: (patch) =>
+        set((state) => ({
+          user: state.user ? { ...state.user, ...patch } : null,
+        })),
+
+      clearAuthSession: () => {
+        ApiService.setToken(null);
+        set({ user: null, authToken: null });
+      },
 
       setServerUrl: (url) => {
         const cleaned = (url || 'http://localhost:5002').trim().replace(/\/+$/, '');
@@ -54,10 +75,22 @@ const useAppStore = create(
     {
       name: 'audiobook-storage',
       storage: createJSONStorage(() => AsyncStorage),
+      partialize: (state) => ({
+        user: state.user,
+        authToken: state.authToken,
+        audiobooks: state.audiobooks,
+        serverUrl: state.serverUrl,
+        themePreference: state.themePreference,
+        defaultNarrationSpeed: state.defaultNarrationSpeed,
+      }),
       onRehydrateStorage: () => (state) => {
         if (state?.serverUrl) {
           ApiService.setBaseUrl(state.serverUrl);
         }
+        if (state?.authToken) {
+          ApiService.setToken(state.authToken);
+        }
+        state?.setHasHydrated(true);
       },
     }
   )

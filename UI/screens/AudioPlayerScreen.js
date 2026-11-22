@@ -14,9 +14,11 @@ import { Ionicons } from '@expo/vector-icons';
 import { Audio } from 'expo-av';
 import { RotateCcw, RotateCw } from 'lucide-react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import HIGButton from '../components/hig/HIGButton';
 import HIGSegmentedControl from '../components/hig/HIGSegmentedControl';
 import PressableScale from '../components/hig/PressableScale';
-import ApiService from '../services/ApiService';
+import AudiobookGenerator, { STAGE_LABELS } from '../services/AudiobookGenerator';
+import LocalLibraryStorage from '../services/LocalLibraryStorage';
 import useAppStore from '../store/UseAppStore';
 import {
   continuousCurve,
@@ -25,8 +27,10 @@ import {
   Typography,
   useHIGTheme,
 } from '../theme/hig';
+import { formatBytes } from '../utils/helpers';
 
 const SKIP_INTERVAL_MS = 10000;
+const PROGRESS_SAVE_INTERVAL_MS = 5000;
 
 const SPEED_OPTIONS = [
   { value: 0.75, label: '0.75x' },
@@ -41,45 +45,106 @@ export default function AudioPlayerScreen({ route, navigation }) {
   const { width } = useWindowDimensions();
   const isWide = width >= 768;
 
-  const book = route.params?.bookData || {};
+  const paramBook = route.params?.bookData || {};
+  const storedBook = useAppStore((state) =>
+    state.audiobooks.find((b) => String(b.id) === String(paramBook.id))
+  );
   const serverUrl = useAppStore((state) => state.serverUrl);
+  const updateAudiobook = useAppStore((state) => state.updateAudiobook);
+  const book = storedBook || paramBook;
 
   const soundRef = useRef(null);
+  const latestPositionRef = useRef(book.lastPositionMs || 0);
+  const lastSavedAtRef = useRef(0);
+
   const [sound, setSound] = useState(null);
   const [isPlaying, setIsPlaying] = useState(false);
-  const [isLoadInitial, setIsLoadInitial] = useState(true);
+  const [isLoadInitial, setIsLoadInitial] = useState(Boolean(book?.audioPath));
   const [isBuffering, setIsBuffering] = useState(false);
-  const [position, setPosition] = useState(0);
+  const [position, setPosition] = useState(book.lastPositionMs || 0);
   const [duration, setDuration] = useState(0);
   const [playbackSpeed, setPlaybackSpeed] = useState(1.0);
   const [trackWidth, setTrackWidth] = useState(0);
+
+  // Local cover resolution
+  const [coverUri, setCoverUri] = useState(null);
   const [imageError, setImageError] = useState(false);
 
-  // Cleaned text reader state
+  // Cleaned text reader state (read directly from local device storage)
   const [showText, setShowText] = useState(false);
   const [cleanedText, setCleanedText] = useState('');
   const [loadingText, setLoadingText] = useState(false);
+
+  const hasAudio = Boolean(book?.audioPath);
+  const isProcessing = book?.status === 'processing';
+  const isFailed = book?.status === 'failed';
+
+  const persistPosition = (positionMs) => {
+    if (!book?.id) return;
+    updateAudiobook(book.id, { lastPositionMs: Math.max(0, Math.round(positionMs || 0)) });
+  };
 
   const onPlaybackStatusUpdate = (status) => {
     if (!status.isLoaded) return;
     setIsPlaying(status.isPlaying);
     setDuration(status.durationMillis || 0);
-    setPosition(status.positionMillis || 0);
+    const pos = status.positionMillis || 0;
+    setPosition(pos);
+    latestPositionRef.current = pos;
     setIsBuffering(status.isBuffering);
+
+    if (status.isPlaying) {
+      const now = Date.now();
+      if (now - lastSavedAtRef.current >= PROGRESS_SAVE_INTERVAL_MS) {
+        lastSavedAtRef.current = now;
+        persistPosition(pos);
+      }
+    }
 
     if (status.didJustFinish) {
       setIsPlaying(false);
       setPosition(0);
+      latestPositionRef.current = 0;
+      persistPosition(0);
     }
   };
 
   useEffect(() => {
     let isMounted = true;
+    let revokeCover = () => {};
+    setImageError(false);
+
+    if (!book?.imageUrl) {
+      setCoverUri(null);
+      return undefined;
+    }
+
+    LocalLibraryStorage.resolveCoverUri(book)
+      .then((res) => {
+        if (!isMounted) {
+          res.revoke?.();
+          return;
+        }
+        revokeCover = res.revoke || (() => {});
+        setCoverUri(res.uri || null);
+      })
+      .catch(() => {
+        if (isMounted) setCoverUri(null);
+      });
+
+    return () => {
+      isMounted = false;
+      revokeCover();
+    };
+  }, [book?.id, book?.imageUrl]);
+
+  useEffect(() => {
+    let isMounted = true;
+    let revokeAudio = () => {};
 
     if (!book?.audioPath) {
       setIsLoadInitial(false);
-      Alert.alert('Audio Not Ready', 'No audio file is available for this book yet.');
-      return;
+      return undefined;
     }
 
     const loadAudio = async () => {
@@ -93,9 +158,23 @@ export default function AudioPlayerScreen({ route, navigation }) {
           playThroughEarpieceAndroid: false,
         });
 
+        const resolved = await LocalLibraryStorage.resolveAudioUri(book);
+        if (!isMounted) {
+          resolved.revoke?.();
+          return;
+        }
+        revokeAudio = resolved.revoke || (() => {});
+
+        const initialPos = book.lastPositionMs || 0;
         const { sound: createdSound } = await Audio.Sound.createAsync(
-          { uri: book.audioPath },
-          { shouldPlay: false, rate: playbackSpeed, isMuted: false, volume: 1.0 },
+          { uri: resolved.uri },
+          {
+            shouldPlay: false,
+            positionMillis: initialPos,
+            rate: playbackSpeed,
+            isMuted: false,
+            volume: 1.0,
+          },
           onPlaybackStatusUpdate
         );
 
@@ -107,9 +186,12 @@ export default function AudioPlayerScreen({ route, navigation }) {
         setSound(createdSound);
         setIsLoadInitial(false);
       } catch (error) {
-        console.error('Error loading audio:', error);
+        console.error('Error loading local audio:', error);
         if (isMounted) {
-          Alert.alert('Playback Error', 'Could not load audiobook stream.');
+          Alert.alert(
+            'Playback Error',
+            error.message || 'Could not load audiobook from device storage.'
+          );
           setIsLoadInitial(false);
         }
       }
@@ -119,21 +201,35 @@ export default function AudioPlayerScreen({ route, navigation }) {
 
     return () => {
       isMounted = false;
+      if (book?.audioPath) {
+        persistPosition(latestPositionRef.current);
+      }
       if (soundRef.current) {
         soundRef.current.unloadAsync().catch(() => {});
         soundRef.current = null;
       }
+      revokeAudio();
     };
-  }, [book?.audioPath]);
+  }, [book?.id, book?.audioPath]);
+
+  const handleCreateAudio = async () => {
+    try {
+      await AudiobookGenerator.generateForBook(book.id);
+    } catch (err) {
+      Alert.alert(
+        'Conversion Failed',
+        `${err.message || 'Could not create audio.'}\n\nServer: ${serverUrl}`
+      );
+    }
+  };
 
   const handleToggleText = async () => {
     const nextState = !showText;
     setShowText(nextState);
-    const targetBookId = book.bookId || book.id;
-    if (nextState && !cleanedText && targetBookId) {
+    if (nextState && !cleanedText) {
       setLoadingText(true);
       try {
-        const txt = await ApiService.getCleanedText(targetBookId, serverUrl);
+        const txt = await LocalLibraryStorage.readCleanedText(book);
         setCleanedText(txt);
       } catch (err) {
         setCleanedText(`Cleaned text unavailable: ${err.message}`);
@@ -143,13 +239,14 @@ export default function AudioPlayerScreen({ route, navigation }) {
     }
   };
 
-  const disabled = isLoadInitial || !book?.audioPath;
+  const disabled = isLoadInitial || !hasAudio;
 
   const handlePlayPause = async () => {
     if (!sound || isLoadInitial || isBuffering) return;
     try {
       if (isPlaying) {
         await sound.pauseAsync();
+        persistPosition(latestPositionRef.current);
       } else {
         await sound.playAsync();
       }
@@ -164,6 +261,8 @@ export default function AudioPlayerScreen({ route, navigation }) {
     const finalPosition = Math.min(Math.max(0, newPosition), duration);
     try {
       await sound.setPositionAsync(finalPosition);
+      latestPositionRef.current = finalPosition;
+      persistPosition(finalPosition);
     } catch (e) {
       console.error('Seek Error:', e);
     }
@@ -187,6 +286,8 @@ export default function AudioPlayerScreen({ route, navigation }) {
     const targetMs = Math.round(ratio * duration);
     try {
       await sound.setPositionAsync(targetMs);
+      latestPositionRef.current = targetMs;
+      persistPosition(targetMs);
     } catch (err) {
       console.error('Seek Error:', err);
     }
@@ -209,7 +310,11 @@ export default function AudioPlayerScreen({ route, navigation }) {
   const progressRatio = duration > 0 ? Math.max(0, Math.min(1, position / duration)) : 0;
   const thumbLeft =
     trackWidth > 14 ? Math.max(0, Math.min(trackWidth - 14, progressRatio * trackWidth - 7)) : 0;
-  const showCover = Boolean(book.imageUrl) && !imageError;
+  const showCover = Boolean(coverUri) && !imageError;
+  const fileLabel = (book.fileType || 'PDF').toUpperCase();
+  const sizeStr = book.localSizeBytes > 0 ? formatBytes(book.localSizeBytes) : null;
+  const isPdfOnly = fileLabel === 'PDF' && !hasAudio;
+  const stageLabel = STAGE_LABELS[book.stage] || 'Processing…';
 
   const sheetContent = (
     <View
@@ -252,21 +357,25 @@ export default function AudioPlayerScreen({ route, navigation }) {
           numberOfLines={1}
           style={[Typography.headline, { color: theme.colors.labelPrimary }]}
         >
-          Now Playing
+          {hasAudio ? 'Now Playing' : 'Document'}
         </Text>
 
-        <PressableScale
-          onPress={handleToggleText}
-          accessibilityLabel={showText ? 'Show cover art' : 'Show cleaned text'}
-          accessibilityState={{ selected: showText }}
-          style={styles.headerButton}
-        >
-          <Ionicons
-            name={showText ? 'document-text' : 'document-text-outline'}
-            size={22}
-            color={showText ? theme.colors.accent : theme.colors.labelPrimary}
-          />
-        </PressableScale>
+        {hasAudio || book.textPath ? (
+          <PressableScale
+            onPress={handleToggleText}
+            accessibilityLabel={showText ? 'Show cover art' : 'Show cleaned text'}
+            accessibilityState={{ selected: showText }}
+            style={styles.headerButton}
+          >
+            <Ionicons
+              name={showText ? 'document-text' : 'document-text-outline'}
+              size={22}
+              color={showText ? theme.colors.accent : theme.colors.labelPrimary}
+            />
+          </PressableScale>
+        ) : (
+          <View style={styles.headerButton} />
+        )}
       </View>
 
       <View style={styles.mainContent}>
@@ -309,7 +418,7 @@ export default function AudioPlayerScreen({ route, navigation }) {
                   },
                 ]}
               >
-                DNN-Cleaned Transcript
+                DNN-Cleaned Transcript (Stored on Device)
               </Text>
 
               {loadingText ? (
@@ -332,7 +441,7 @@ export default function AudioPlayerScreen({ route, navigation }) {
                       },
                     ]}
                   >
-                    {cleanedText || 'No cleaned text available for this book.'}
+                    {cleanedText || 'No cleaned text stored for this book.'}
                   </Text>
                 </ScrollView>
               )}
@@ -354,14 +463,14 @@ export default function AudioPlayerScreen({ route, navigation }) {
               >
                 {showCover ? (
                   <Image
-                    source={{ uri: book.imageUrl }}
+                    source={{ uri: coverUri }}
                     style={styles.coverArt}
                     resizeMode="cover"
                     onError={() => setImageError(true)}
                   />
                 ) : (
                   <Ionicons
-                    name="book-outline"
+                    name={isPdfOnly ? 'document-text-outline' : 'book-outline'}
                     size={56}
                     color={theme.colors.labelSecondary}
                   />
@@ -388,169 +497,285 @@ export default function AudioPlayerScreen({ route, navigation }) {
                   { color: theme.colors.labelSecondary },
                 ]}
               >
-                {book.author || 'AI Narrator'}
+                {book.author || (hasAudio ? 'AI Narrator' : `${fileLabel} Document`)}
               </Text>
+              {!hasAudio && (
+                <>
+                  <Text
+                    style={[
+                      Typography.footnote,
+                      Typography.tabularNums,
+                      styles.docSizeLine,
+                      { color: theme.colors.labelSecondary },
+                    ]}
+                  >
+                    {[fileLabel, sizeStr].filter(Boolean).join(' · ')}
+                  </Text>
+                  <Text
+                    style={[
+                      Typography.subheadlineRegular,
+                      styles.docPromptNote,
+                      { color: theme.colors.labelSecondary },
+                    ]}
+                  >
+                    Saved on this device. Run the DNN cleaner and Neural TTS to generate an offline audiobook.
+                  </Text>
+                </>
+              )}
             </View>
           </View>
         )}
 
-        <View style={styles.controlsSection}>
-          <View style={styles.scrubberBlock}>
-            <Pressable
-              onLayout={(e) => setTrackWidth(e.nativeEvent.layout.width)}
-              onPress={handleSeekPress}
-              disabled={disabled || duration <= 0}
-              accessibilityRole="adjustable"
-              accessibilityLabel="Playback position"
-              accessibilityValue={{
-                min: 0,
-                max: Math.round(duration / 1000),
-                now: Math.round(position / 1000),
-                text: formatTime(position),
-              }}
-              style={styles.scrubberHitArea}
-            >
-              <View
-                style={[
-                  styles.progressTrack,
-                  { backgroundColor: theme.colors.surfaceInset },
-                ]}
+        {hasAudio ? (
+          <View style={styles.controlsSection}>
+            <View style={styles.scrubberBlock}>
+              <Pressable
+                onLayout={(e) => setTrackWidth(e.nativeEvent.layout.width)}
+                onPress={handleSeekPress}
+                disabled={disabled || duration <= 0}
+                accessibilityRole="adjustable"
+                accessibilityLabel="Playback position"
+                accessibilityValue={{
+                  min: 0,
+                  max: Math.round(duration / 1000),
+                  now: Math.round(position / 1000),
+                  text: formatTime(position),
+                }}
+                style={styles.scrubberHitArea}
               >
                 <View
                   style={[
-                    styles.progressFilled,
-                    {
-                      backgroundColor: theme.colors.accent,
-                      width: `${progressRatio * 100}%`,
-                    },
+                    styles.progressTrack,
+                    { backgroundColor: theme.colors.surfaceInset },
                   ]}
-                />
-                {duration > 0 && (
+                >
                   <View
                     style={[
-                      styles.progressThumb,
+                      styles.progressFilled,
                       {
                         backgroundColor: theme.colors.accent,
-                        left: thumbLeft,
+                        width: `${progressRatio * 100}%`,
                       },
                     ]}
                   />
-                )}
-              </View>
-            </Pressable>
+                  {duration > 0 && (
+                    <View
+                      style={[
+                        styles.progressThumb,
+                        {
+                          backgroundColor: theme.colors.accent,
+                          left: thumbLeft,
+                        },
+                      ]}
+                    />
+                  )}
+                </View>
+              </Pressable>
 
-            <View style={styles.timeRow}>
-              <Text
-                style={[
-                  Typography.caption,
-                  Typography.tabularNums,
-                  { color: theme.colors.labelSecondary },
-                ]}
-              >
-                {formatTime(position)}
-              </Text>
-              <Text
-                style={[
-                  Typography.caption,
-                  Typography.tabularNums,
-                  { color: theme.colors.labelSecondary },
-                ]}
-              >
-                {formatTime(duration)}
-              </Text>
+              <View style={styles.timeRow}>
+                <Text
+                  style={[
+                    Typography.caption,
+                    Typography.tabularNums,
+                    { color: theme.colors.labelSecondary },
+                  ]}
+                >
+                  {formatTime(position)}
+                </Text>
+                <Text
+                  style={[
+                    Typography.caption,
+                    Typography.tabularNums,
+                    { color: theme.colors.labelSecondary },
+                  ]}
+                >
+                  {formatTime(duration)}
+                </Text>
+              </View>
             </View>
-          </View>
 
-          <View style={styles.transportRow}>
-            <PressableScale
-              onPress={() => handleSkip(-1)}
+            <View style={styles.transportRow}>
+              <PressableScale
+                onPress={() => handleSkip(-1)}
+                disabled={disabled}
+                accessibilityLabel="Rewind 10 seconds"
+                style={styles.skipButton}
+              >
+                <View style={styles.skipIconWrap}>
+                  <RotateCcw
+                    size={30}
+                    strokeWidth={1.75}
+                    color={disabled ? theme.colors.labelTertiary : theme.colors.labelPrimary}
+                  />
+                  <Text
+                    style={[
+                      Typography.caption,
+                      Typography.tabularNums,
+                      styles.skipLabel,
+                      {
+                        color: disabled ? theme.colors.labelTertiary : theme.colors.labelPrimary,
+                      },
+                    ]}
+                  >
+                    10
+                  </Text>
+                </View>
+              </PressableScale>
+
+              <PressableScale
+                onPress={handlePlayPause}
+                disabled={disabled}
+                accessibilityLabel={isPlaying ? 'Pause' : 'Play'}
+                style={[
+                  styles.playPauseButton,
+                  {
+                    backgroundColor: disabled
+                      ? theme.colors.fillSecondary
+                      : theme.colors.accent,
+                  },
+                ]}
+              >
+                {isLoadInitial || isBuffering ? (
+                  <ActivityIndicator size="large" color={theme.colors.accentOnFill} />
+                ) : (
+                  <Ionicons
+                    name={isPlaying ? 'pause' : 'play'}
+                    size={34}
+                    color={theme.colors.accentOnFill}
+                    style={!isPlaying ? styles.playIconOffset : undefined}
+                  />
+                )}
+              </PressableScale>
+
+              <PressableScale
+                onPress={() => handleSkip(1)}
+                disabled={disabled}
+                accessibilityLabel="Skip forward 10 seconds"
+                style={styles.skipButton}
+              >
+                <View style={styles.skipIconWrap}>
+                  <RotateCw
+                    size={30}
+                    strokeWidth={1.75}
+                    color={disabled ? theme.colors.labelTertiary : theme.colors.labelPrimary}
+                  />
+                  <Text
+                    style={[
+                      Typography.caption,
+                      Typography.tabularNums,
+                      styles.skipLabel,
+                      {
+                        color: disabled ? theme.colors.labelTertiary : theme.colors.labelPrimary,
+                      },
+                    ]}
+                  >
+                    10
+                  </Text>
+                </View>
+              </PressableScale>
+            </View>
+
+            <HIGSegmentedControl
+              tabular
+              options={SPEED_OPTIONS}
+              value={playbackSpeed}
+              onChange={handleSpeedChange}
               disabled={disabled}
-              accessibilityLabel="Rewind 10 seconds"
-              style={styles.skipButton}
-            >
-              <View style={styles.skipIconWrap}>
-                <RotateCcw
-                  size={30}
-                  strokeWidth={1.75}
-                  color={disabled ? theme.colors.labelTertiary : theme.colors.labelPrimary}
-                />
-                <Text
+              accessibilityLabel="Playback speed"
+            />
+          </View>
+        ) : (
+          <View style={styles.docGenerateSection}>
+            {isProcessing && (
+              <View style={styles.docProgressBlock}>
+                <View
                   style={[
-                    Typography.caption,
-                    Typography.tabularNums,
-                    styles.skipLabel,
-                    {
-                      color: disabled ? theme.colors.labelTertiary : theme.colors.labelPrimary,
-                    },
+                    styles.progressTrack,
+                    { backgroundColor: theme.colors.surfaceInset },
                   ]}
                 >
-                  10
-                </Text>
+                  <View
+                    style={[
+                      styles.progressFilled,
+                      {
+                        backgroundColor: theme.colors.accent,
+                        width: `${Math.max(0, Math.min(100, book.progress || 0))}%`,
+                      },
+                    ]}
+                  />
+                </View>
+                <View style={styles.docProgressTextRow}>
+                  <Text
+                    numberOfLines={2}
+                    style={[
+                      Typography.footnote,
+                      { flex: 1, color: theme.colors.labelPrimary },
+                    ]}
+                  >
+                    {stageLabel}
+                  </Text>
+                  <Text
+                    style={[
+                      Typography.footnote,
+                      Typography.tabularNums,
+                      { fontWeight: '600', color: theme.colors.accent },
+                    ]}
+                  >
+                    {book.progress || 0}%
+                  </Text>
+                </View>
               </View>
-            </PressableScale>
+            )}
 
-            <PressableScale
-              onPress={handlePlayPause}
-              disabled={disabled}
-              accessibilityLabel={isPlaying ? 'Pause' : 'Play'}
-              style={[
-                styles.playPauseButton,
-                {
-                  backgroundColor: disabled
-                    ? theme.colors.fillSecondary
-                    : theme.colors.accent,
-                },
-              ]}
-            >
-              {isLoadInitial || isBuffering ? (
-                <ActivityIndicator size="large" color={theme.colors.accentOnFill} />
-              ) : (
+            {isFailed && book.error ? (
+              <View
+                accessibilityRole="alert"
+                style={[
+                  styles.errorBanner,
+                  continuousCurve,
+                  { backgroundColor: theme.colors.destructiveTint },
+                ]}
+              >
                 <Ionicons
-                  name={isPlaying ? 'pause' : 'play'}
-                  size={34}
-                  color={theme.colors.accentOnFill}
-                  style={!isPlaying ? styles.playIconOffset : undefined}
-                />
-              )}
-            </PressableScale>
-
-            <PressableScale
-              onPress={() => handleSkip(1)}
-              disabled={disabled}
-              accessibilityLabel="Skip forward 10 seconds"
-              style={styles.skipButton}
-            >
-              <View style={styles.skipIconWrap}>
-                <RotateCw
-                  size={30}
-                  strokeWidth={1.75}
-                  color={disabled ? theme.colors.labelTertiary : theme.colors.labelPrimary}
+                  name="alert-circle-outline"
+                  size={18}
+                  color={theme.colors.destructive}
                 />
                 <Text
                   style={[
-                    Typography.caption,
-                    Typography.tabularNums,
-                    styles.skipLabel,
-                    {
-                      color: disabled ? theme.colors.labelTertiary : theme.colors.labelPrimary,
-                    },
+                    Typography.footnote,
+                    { flex: 1, color: theme.colors.destructive, fontWeight: '500' },
                   ]}
                 >
-                  10
+                  {book.error}
                 </Text>
               </View>
-            </PressableScale>
-          </View>
+            ) : null}
 
-          <HIGSegmentedControl
-            tabular
-            options={SPEED_OPTIONS}
-            value={playbackSpeed}
-            onChange={handleSpeedChange}
-            disabled={disabled}
-            accessibilityLabel="Playback speed"
-          />
-        </View>
+            <HIGButton
+              variant="primary"
+              fullWidth
+              loading={isProcessing}
+              title={
+                isProcessing
+                  ? 'Creating Audiobook…'
+                  : isFailed
+                  ? 'Retry Audiobook'
+                  : 'Clean with DNN & Create Audio'
+              }
+              icon={
+                !isProcessing ? (
+                  <Ionicons
+                    name="sparkles-outline"
+                    size={20}
+                    color={theme.colors.accentOnFill}
+                  />
+                ) : null
+              }
+              onPress={handleCreateAudio}
+            />
+          </View>
+        )}
       </View>
     </View>
   );
@@ -660,6 +885,14 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     marginTop: Spacing.xs,
   },
+  docSizeLine: {
+    marginTop: Spacing.xs,
+  },
+  docPromptNote: {
+    textAlign: 'center',
+    maxWidth: 340,
+    marginTop: Spacing.sm,
+  },
   readerWrapper: {
     flex: 1,
     paddingVertical: Spacing.sm,
@@ -689,6 +922,27 @@ const styles = StyleSheet.create({
   },
   controlsSection: {
     paddingTop: Spacing.sm,
+  },
+  docGenerateSection: {
+    paddingTop: Spacing.base,
+    gap: Spacing.base,
+  },
+  docProgressBlock: {
+    gap: Spacing.sm,
+  },
+  docProgressTextRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: Spacing.sm,
+  },
+  errorBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.sm,
+    paddingHorizontal: Spacing.md,
+    paddingVertical: Spacing.md,
+    borderRadius: Radii.control,
   },
   scrubberBlock: {
     width: '100%',

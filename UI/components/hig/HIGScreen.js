@@ -1,5 +1,5 @@
 import React, { useContext, useRef } from 'react';
-import { Animated, StyleSheet, View, useWindowDimensions } from 'react-native';
+import { Animated, StyleSheet, Text, View, useWindowDimensions } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { NavigationLayoutContext } from '../../navigation/NavigationLayoutContext';
 import {
@@ -12,15 +12,18 @@ import {
 } from '../../theme/hig';
 
 const HEADER_HEIGHT = 48;
+const LEVELED_HEADER_HEIGHT = 56;
 
 /**
  * Shared screen scaffold implementing Apple HIG edge-to-edge scrolling,
- * translucent sticky navigation bar, and Large Title -> Inline Title transition.
+ * translucent sticky navigation bar, and Large Title -> Inline Title transition
+ * (or a single leveled Large Title + trailing control row when `leveledHeader` is set).
  */
 export default function HIGScreen({
   title,
   headerLeft = null,
   headerRight = null,
+  leveledHeader = false,
   children,
   scrollEnabled = true,
   contentContainerStyle,
@@ -52,7 +55,8 @@ export default function HIGScreen({
     extrapolate: 'clamp',
   });
 
-  const topBarHeight = insets.top + HEADER_HEIGHT;
+  const headerHeight = leveledHeader ? LEVELED_HEADER_HEIGHT : HEADER_HEIGHT;
+  const topBarHeight = insets.top + headerHeight;
 
   return (
     <View style={[styles.root, { backgroundColor: theme.colors.surfaceGroupedCanvas }]}>
@@ -68,7 +72,7 @@ export default function HIGScreen({
         )}
         contentContainerStyle={[
           {
-            paddingTop: topBarHeight + Spacing.sm,
+            paddingTop: topBarHeight + (leveledHeader ? Spacing.md : Spacing.sm),
             paddingBottom: bottomBarHeight + Spacing.xxl,
             alignItems: 'center',
           },
@@ -84,19 +88,21 @@ export default function HIGScreen({
             },
           ]}
         >
-          <Animated.Text
-            accessibilityRole="header"
-            style={[
-              Typography.largeTitle,
-              {
-                color: theme.colors.labelPrimary,
-                marginBottom: Spacing.base,
-                opacity: largeTitleOpacity,
-              },
-            ]}
-          >
-            {title}
-          </Animated.Text>
+          {!leveledHeader && (
+            <Animated.Text
+              accessibilityRole="header"
+              style={[
+                Typography.largeTitle,
+                {
+                  color: theme.colors.labelPrimary,
+                  marginBottom: Spacing.base,
+                  opacity: largeTitleOpacity,
+                },
+              ]}
+            >
+              {title}
+            </Animated.Text>
+          )}
           {children}
         </View>
       </Animated.ScrollView>
@@ -118,24 +124,55 @@ export default function HIGScreen({
             },
           ]}
         />
-        <View style={styles.headerRow}>
-          <View style={styles.headerSideLeft}>{headerLeft}</View>
-          <View style={styles.headerCenter} pointerEvents="none">
-            <Animated.Text
-              numberOfLines={1}
+        {leveledHeader ? (
+          <View pointerEvents="box-none" style={styles.leveledHeaderOuter}>
+            <View
+              pointerEvents="box-none"
               style={[
-                Typography.headline,
+                styles.leveledHeaderInner,
                 {
-                  color: theme.colors.labelPrimary,
-                  opacity: inlineTitleOpacity,
+                  height: headerHeight,
+                  maxWidth: metrics.contentMaxWidth,
+                  paddingHorizontal: metrics.horizontalMargin,
                 },
               ]}
             >
-              {title}
-            </Animated.Text>
+              <Text
+                accessibilityRole="header"
+                numberOfLines={1}
+                style={[
+                  Typography.largeTitle,
+                  {
+                    color: theme.colors.labelPrimary,
+                    flexShrink: 1,
+                  },
+                ]}
+              >
+                {title}
+              </Text>
+              <View style={styles.leveledHeaderRight}>{headerRight}</View>
+            </View>
           </View>
-          <View style={styles.headerSideRight}>{headerRight}</View>
-        </View>
+        ) : (
+          <View style={styles.headerRow}>
+            <View style={styles.headerSideLeft}>{headerLeft}</View>
+            <View style={styles.headerCenter} pointerEvents="none">
+              <Animated.Text
+                numberOfLines={1}
+                style={[
+                  Typography.headline,
+                  {
+                    color: theme.colors.labelPrimary,
+                    opacity: inlineTitleOpacity,
+                  },
+                ]}
+              >
+                {title}
+              </Animated.Text>
+            </View>
+            <View style={styles.headerSideRight}>{headerRight}</View>
+          </View>
+        )}
       </View>
     </View>
   );
@@ -157,6 +194,23 @@ const styles = StyleSheet.create({
     left: 0,
     right: 0,
     zIndex: 20,
+  },
+  leveledHeaderOuter: {
+    alignItems: 'center',
+  },
+  leveledHeaderInner: {
+    width: '100%',
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: Spacing.sm,
+  },
+  leveledHeaderRight: {
+    marginRight: -Spacing.sm,
+    minWidth: 44,
+    height: 44,
+    alignItems: 'flex-end',
+    justifyContent: 'center',
   },
   headerRow: {
     height: HEADER_HEIGHT,

@@ -1,41 +1,31 @@
-"""Bookshelf API: import PDF/EPUB -> neural text cleaning -> neural TTS audiobook.
+"""Bookshelf API: user authentication (DB) + ephemeral PDF/EPUB -> neural TTS conversion.
 
-Pipeline (runs in a background worker thread for every uploaded book):
-
-  1. extract   : text + layout (position, font size, ...) from PDF / EPUB
-  2. clean     : a deep neural network (ai/model.py) labels every line as body,
-                 heading, page number, header/footer, footnote or noise; only
-                 body + headings are kept and re-assembled into paragraphs
-  3. narrate   : Piper neural TTS reads the cleaned text
-  4. encode    : FFmpeg compresses the result to MP3
-
-Run (from the Backend folder):
-    venv/bin/uvicorn app:app --host 0.0.0.0 --port 5002
+Books, generated MP3 audio, covers, and cleaned text are stored locally on the
+user's phone — never in the database. The server keeps ephemeral scratch files
+only long enough for the client to download them, then deletes them.
 """
-import logging
-import os
-import shutil
-import time
-import uuid
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
+from dataclasses import asdict, dataclass, field
+import logging
+import os
 from pathlib import Path
-from typing import Optional
+import shutil
+import threading
+import time
+from typing import Dict, Optional
+import uuid
 
-from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy.orm import Session
 from starlette.responses import FileResponse, JSONResponse, PlainTextResponse
-
-from database import init_db
-from database.db import AudioBook, Book, SessionLocal
-from database.routes import router as database_router
-from database.services import AudioBookService, BookService
 
 from ai.cleaner import get_cleaner
 from ai.extraction import ExtractionError, extract_cover, extract_document
 from ai.tts import DEFAULT_VOICE, TTS_BACKEND, Narrator, TTSError
+from database import init_db
+from database.routes import router as auth_router
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("bookshelf")
@@ -44,40 +34,153 @@ log = logging.getLogger("bookshelf")
 # Configuration
 # ----------------------------------------------------------------------
 BASE_DIR = Path(__file__).resolve().parent
-STORAGE_DIR = Path(os.getenv("STORAGE_DIR", BASE_DIR / "storage"))
-UPLOAD_DIR = STORAGE_DIR / "uploads"
-AUDIO_DIR = STORAGE_DIR / "audio"
-TEXT_DIR = STORAGE_DIR / "text"
-COVER_DIR = STORAGE_DIR / "covers"
-TMP_DIR = STORAGE_DIR / "tmp"
-for _d in (UPLOAD_DIR, AUDIO_DIR, TEXT_DIR, COVER_DIR, TMP_DIR):
-    _d.mkdir(parents=True, exist_ok=True)
+TMP_DIR = Path(os.getenv("TMP_DIR", Path(os.getenv("STORAGE_DIR", BASE_DIR / "storage")) / "tmp"))
+TMP_DIR.mkdir(parents=True, exist_ok=True)
 
 DEFAULT_SPEED = 1.0  # 1.0 = natural speed, 1.25 = 25% faster, 0.8 = slower
 ALLOWED_TYPES = {".pdf", ".epub"}
 MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "200"))
+JOB_TTL_SECONDS = int(os.getenv("JOB_TTL_SECONDS", "3600"))
 
 # One worker = books are narrated one after another (TTS is CPU heavy).
-executor = ThreadPoolExecutor(max_workers=int(os.getenv("TTS_WORKERS", "1")), thread_name_prefix="narrator")
+executor = ThreadPoolExecutor(
+    max_workers=int(os.getenv("TTS_WORKERS", "1")),
+    thread_name_prefix="narrator",
+)
+
+
+# ----------------------------------------------------------------------
+# Ephemeral in-memory conversion job registry
+# ----------------------------------------------------------------------
+
+@dataclass
+class ConversionJob:
+    job_id: str
+    file_name: str
+    file_type: str
+    title: str
+    voice: str
+    speed: float
+    work_dir: Path
+    mp3_path: Path
+    text_path: Path
+    cover_path: Path
+    author: str = "Unknown"
+    status: str = "pending"  # pending | processing | completed | failed
+    stage: str = "queued"    # queued | extracting | cleaning | narrating | encoding | done | failed
+    progress: float = 0.0
+    duration: Optional[float] = None
+    file_size: Optional[int] = None
+    has_cover: bool = False
+    has_text: bool = False
+    error: Optional[str] = None
+    created_at: float = field(default_factory=time.time)
+    updated_at: float = field(default_factory=time.time)
+
+    def to_dict(self) -> dict:
+        return {
+            "job_id": self.job_id,
+            "status": self.status,
+            "stage": self.stage,
+            "progress": round(self.progress or 0.0, 1),
+            "title": self.title,
+            "author": self.author,
+            "file_name": self.file_name,
+            "file_type": self.file_type,
+            "voice": self.voice,
+            "speed": self.speed,
+            "duration": self.duration,
+            "file_size": self.file_size,
+            "has_cover": self.has_cover,
+            "has_text": self.has_text,
+            "error": self.error,
+        }
+
+
+_jobs: Dict[str, ConversionJob] = {}
+_jobs_lock = threading.Lock()
+
+
+def _update_job(job_id: str, **changes) -> None:
+    with _jobs_lock:
+        job = _jobs.get(job_id)
+        if not job:
+            return
+        for key, value in changes.items():
+            setattr(job, key, value)
+        job.updated_at = time.time()
+
+
+def _get_job(job_id: str) -> Optional[ConversionJob]:
+    with _jobs_lock:
+        job = _jobs.get(job_id)
+        if not job:
+            return None
+        # Return a shallow snapshot via dataclass copy of fields
+        return ConversionJob(**asdict(job))
+
+
+def _clear_dir_contents(directory: Path) -> None:
+    if not directory.exists():
+        return
+    for entry in directory.iterdir():
+        if entry.is_dir():
+            shutil.rmtree(entry, ignore_errors=True)
+        else:
+            entry.unlink(missing_ok=True)
+
+
+def _cleanup_expired_jobs() -> None:
+    cutoff = time.time() - JOB_TTL_SECONDS
+    expired_dirs = []
+    with _jobs_lock:
+        expired_ids = [
+            jid
+            for jid, j in _jobs.items()
+            if j.status in ("completed", "failed") and j.updated_at < cutoff
+        ]
+        for jid in expired_ids:
+            job = _jobs.pop(jid)
+            expired_dirs.append(job.work_dir)
+    for work_dir in expired_dirs:
+        shutil.rmtree(work_dir, ignore_errors=True)
 
 
 # ----------------------------------------------------------------------
 # Pipeline
 # ----------------------------------------------------------------------
 
-def run_pipeline(source_path: Path, mp3_path: Path, text_path: Path, speed: float, voice: str,
-                 on_progress=None, on_stage=None, on_metadata=None) -> float:
+def run_pipeline(
+    source_path: Path,
+    mp3_path: Path,
+    text_path: Path,
+    speed: float,
+    voice: str,
+    on_progress=None,
+    on_stage=None,
+    on_metadata=None,
+    delete_source_after_extract: bool = False,
+) -> float:
     """Extract -> clean (DNN) -> narrate (TTS) -> MP3. Returns duration in seconds."""
     stage = on_stage or (lambda s, p: None)
 
     stage("extracting", 1.0)
-    doc = extract_document(str(source_path))
+    try:
+        doc = extract_document(str(source_path))
+    finally:
+        if delete_source_after_extract:
+            source_path.unlink(missing_ok=True)
+
     if on_metadata:
         on_metadata(doc.title, doc.author)
 
     stage("cleaning", 3.0)
     result = get_cleaner().clean(doc)
-    log.info("Cleaner (%s) label counts: %s", "DNN" if result.used_model else "heuristic", result.label_counts)
+    log.info(
+        "Cleaner (%s) label counts: %s",
+        "DNN" if result.used_model else "heuristic",
+        result.label_counts,
+    )
     if not result.paragraphs:
         raise ExtractionError("No readable body text was found after cleaning.")
     with open(text_path, "w", encoding="utf-8") as f:
@@ -87,64 +190,79 @@ def run_pipeline(source_path: Path, mp3_path: Path, text_path: Path, speed: floa
     stage("narrating", 5.0)
     narrator = Narrator(voice=voice, speed=speed)
     duration = narrator.narrate(
-        result.paragraphs, mp3_path,
+        result.paragraphs,
+        mp3_path,
         progress=lambda frac: on_progress and on_progress(5.0 + frac * 93.0),
     )
     stage("encoding", 99.0)
     return duration
 
 
-def process_audiobook_job(book_id: int, audiobook_id: int, source_path: str, speed: float, voice: str):
-    """Background job (runs in the worker thread)."""
-    db = SessionLocal()
+def _process_conversion_job(job_id: str, source_path: Path) -> None:
+    """Background worker that processes an ephemeral conversion job."""
+    job = _get_job(job_id)
+    if not job:
+        source_path.unlink(missing_ok=True)
+        return
+
     last = {"p": -1.0}
 
-    def update(**kw):
-        try:
-            AudioBookService.update_audiobook(db, audiobook_id, **kw)
-        except Exception as exc:  # never let a DB hiccup kill the job
-            log.warning("progress update failed: %s", exc)
-            db.rollback()
-
-    def on_progress(p):
+    def on_progress(p: float):
         if p - last["p"] >= 1.0:
             last["p"] = p
-            update(progress=round(p, 1))
+            _update_job(job_id, progress=round(p, 1))
 
-    def on_stage(stage, p):
-        update(stage=stage, progress=p, generation_status="processing")
+    def on_stage(stage: str, p: float):
+        _update_job(job_id, stage=stage, progress=p, status="processing")
 
-    def on_metadata(title, author):
-        book = BookService.get_book(db, book_id)
-        if not book:
+    def on_metadata(title: Optional[str], author: Optional[str]):
+        current = _get_job(job_id)
+        if not current:
             return
         changes = {}
-        if title and len(title) > 2 and book.title == Path(book.file_name).stem:
-            changes["title"] = title[:250]
-        if author and (not book.author or book.author == "Unknown"):
-            changes["author"] = author[:250]
+        if title and len(title.strip()) > 2 and current.title == Path(current.file_name).stem:
+            changes["title"] = title.strip()[:250]
+        if author and author.strip() and author.strip().lower() != "unknown" and (
+            not current.author or current.author == "Unknown"
+        ):
+            changes["author"] = author.strip()[:250]
         if changes:
-            BookService.update_book(db, book_id, **changes)
+            _update_job(job_id, **changes)
 
-    mp3_path = AUDIO_DIR / f"book_{book_id}_{audiobook_id}.mp3"
-    text_path = TEXT_DIR / f"book_{book_id}.txt"
     t0 = time.time()
     try:
-        log.info("Starting audiobook job book_id=%s audiobook_id=%s", book_id, audiobook_id)
-        duration = run_pipeline(Path(source_path), mp3_path, text_path, speed, voice,
-                                on_progress=on_progress, on_stage=on_stage, on_metadata=on_metadata)
-        update(file_path=str(mp3_path), file_name=mp3_path.name, file_size=mp3_path.stat().st_size,
-               duration=duration, generation_status="completed", progress=100.0, stage="done",
-               text_path=str(text_path))
-        log.info("✅ Audiobook ready for book_id=%s (%.0fs audio, took %.0fs)", book_id, duration, time.time() - t0)
+        log.info("Starting ephemeral conversion job=%s", job_id)
+        duration = run_pipeline(
+            source_path=source_path,
+            mp3_path=job.mp3_path,
+            text_path=job.text_path,
+            speed=job.speed,
+            voice=job.voice,
+            on_progress=on_progress,
+            on_stage=on_stage,
+            on_metadata=on_metadata,
+            delete_source_after_extract=True,
+        )
+        file_size = job.mp3_path.stat().st_size if job.mp3_path.is_file() else 0
+        has_text = job.text_path.is_file()
+        _update_job(
+            job_id,
+            status="completed",
+            stage="done",
+            progress=100.0,
+            duration=duration,
+            file_size=file_size,
+            has_text=has_text,
+        )
+        log.info("✅ Conversion job=%s ready (%.0fs audio, took %.0fs)", job_id, duration, time.time() - t0)
     except (ExtractionError, TTSError) as exc:
-        log.error("Audiobook job failed for book_id=%s: %s", book_id, exc)
-        update(generation_status="failed", error_message=str(exc), stage="failed")
+        log.error("Conversion job=%s failed: %s", job_id, exc)
+        _update_job(job_id, status="failed", stage="failed", error=str(exc))
     except Exception as exc:
-        log.exception("Unexpected error in audiobook job for book_id=%s", book_id)
-        update(generation_status="failed", error_message=f"Internal error: {exc}", stage="failed")
+        log.exception("Unexpected error in conversion job=%s", job_id)
+        _update_job(job_id, status="failed", stage="failed", error=f"Internal error: {exc}")
     finally:
-        db.close()
+        source_path.unlink(missing_ok=True)
 
 
 # ----------------------------------------------------------------------
@@ -154,41 +272,36 @@ def process_audiobook_job(book_id: int, audiobook_id: int, source_path: str, spe
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
-    # Jobs that were running when the server stopped will never finish.
-    db = SessionLocal()
-    try:
-        for ab in db.query(AudioBook).filter(AudioBook.generation_status.in_(["pending", "processing"])).all():
-            ab.generation_status = "failed"
-            ab.error_message = "Server restarted during generation. Use /books/{id}/regenerate."
-        db.commit()
-    finally:
-        db.close()
+    TMP_DIR.mkdir(parents=True, exist_ok=True)
+    _clear_dir_contents(TMP_DIR)
     get_cleaner()  # load the DNN once at start-up
     yield
     executor.shutdown(wait=False, cancel_futures=True)
+    _clear_dir_contents(TMP_DIR)
 
 
-app = FastAPI(title="Bookshelf Audiobook Generator",
-              description="PDF/EPUB -> DNN text cleaning -> Piper neural TTS -> MP3",
-              lifespan=lifespan)
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=False,
-                   allow_methods=["*"], allow_headers=["*"])
-app.include_router(database_router)
+app = FastAPI(
+    title="Bookshelf Audiobook Generator",
+    description="Auth-only DB + ephemeral PDF/EPUB -> DNN text cleaning -> Piper neural TTS -> MP3",
+    lifespan=lifespan,
+)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+app.include_router(auth_router)
 
 
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
-
-
-async def _save_upload(file: UploadFile) -> Path:
+async def _save_temp_upload(file: UploadFile, dest: Path) -> None:
     suffix = Path(file.filename or "").suffix.lower()
     if suffix not in ALLOWED_TYPES:
-        raise HTTPException(400, f"Unsupported file type '{suffix}'. Please upload a PDF or EPUB file.")
-    dest = UPLOAD_DIR / f"{uuid.uuid4().hex}{suffix}"
+        raise HTTPException(
+            400, f"Unsupported file type '{suffix}'. Please upload a PDF or EPUB file."
+        )
+    dest.parent.mkdir(parents=True, exist_ok=True)
     size = 0
     with open(dest, "wb") as out:
         while chunk := await file.read(1024 * 1024):
@@ -201,157 +314,120 @@ async def _save_upload(file: UploadFile) -> Path:
     if size == 0:
         dest.unlink(missing_ok=True)
         raise HTTPException(400, "Uploaded file is empty.")
-    return dest
 
 
-def _audiobook_json(ab: Optional[AudioBook]):
-    if ab is None:
-        return None
-    return {
-        "id": ab.id, "book_id": ab.book_id, "status": ab.generation_status,
-        "progress": ab.progress or 0.0, "stage": ab.stage, "error": ab.error_message,
-        "duration": ab.duration, "file_size": ab.file_size, "speaker_speed": ab.speaker_speed,
-        "voice": ab.voice,
-        "stream_url": f"/stream-audiobook/book/{ab.book_id}" if ab.generation_status == "completed" else None,
-        "created_at": ab.created_at.isoformat() if ab.created_at else None,
-    }
-
-
-def _book_json(book: Book):
-    return {
-        "id": book.id, "title": book.title, "author": book.author, "file_name": book.file_name,
-        "file_type": book.file_type, "file_size": book.file_size, "cover_image": book.cover_image,
-        "created_at": book.created_at.isoformat() if book.created_at else None,
-    }
-
-
-def _start_job(db: Session, book: Book, speed: float, voice: str) -> AudioBook:
-    audiobook = AudioBookService.get_audiobook_by_book_id(db, book.id)
-    if audiobook is None:
-        audiobook = AudioBookService.create_audiobook(db=db, book_id=book.id, file_name="", file_path="",
-                                                      speaker_speed=speed, file_size=0)
-    AudioBookService.update_audiobook(db, audiobook.id, generation_status="pending", progress=0.0,
-                                      stage="queued", speaker_speed=speed, voice=voice, error_message="")
-    executor.submit(process_audiobook_job, book.id, audiobook.id, book.file_path, speed, voice)
-    db.refresh(audiobook)
-    return audiobook
-
-
-@app.post("/upload-book/")
-async def upload_book(
+@app.post("/jobs/convert")
+async def start_conversion_job(
     file: UploadFile = File(...),
     speed: float = Form(DEFAULT_SPEED),
     voice: str = Form(DEFAULT_VOICE),
-    user_id: int = Form(1),
-    db: Session = Depends(get_db),
 ):
-    """Upload a PDF/EPUB. Returns immediately; poll /audiobook-status/book/{id} for progress."""
-    path = await _save_upload(file)
+    """Upload a PDF/EPUB for ephemeral conversion. Poll /jobs/{job_id}/status and download assets to the phone."""
+    _cleanup_expired_jobs()
+
+    job_id = uuid.uuid4().hex
+    work_dir = TMP_DIR / job_id
+    work_dir.mkdir(parents=True, exist_ok=True)
+
+    original_name = file.filename or f"book_{job_id}.pdf"
+    suffix = Path(original_name).suffix.lower()
+    source_path = work_dir / f"source{suffix}"
+    mp3_path = work_dir / "audio.mp3"
+    text_path = work_dir / "cleaned.txt"
+    cover_path = work_dir / "cover.png"
+
     try:
-        book = BookService.create_book(
-            db=db, title=Path(file.filename).stem, author="Unknown", file_name=file.filename,
-            file_type=path.suffix.lstrip("."), file_path=str(path), file_size=path.stat().st_size,
-        )
-        cover_path = COVER_DIR / f"book_{book.id}.png"
-        has_cover = await run_in_threadpool(extract_cover, str(path), str(cover_path))
-        cover = f"/books/{book.id}/cover" if has_cover else f"https://picsum.photos/seed/{book.id}/300/400"
-        BookService.update_book(db, book.id, cover_image=cover)
-        db.refresh(book)
-        audiobook = _start_job(db, book, speed, voice)
+        await _save_temp_upload(file, source_path)
+        has_cover = await run_in_threadpool(extract_cover, str(source_path), str(cover_path))
     except HTTPException:
+        shutil.rmtree(work_dir, ignore_errors=True)
         raise
     except Exception as exc:
-        log.exception("Upload failed")
-        path.unlink(missing_ok=True)
+        shutil.rmtree(work_dir, ignore_errors=True)
+        log.exception("Failed to stage conversion job")
         raise HTTPException(500, f"Internal Server Error: {exc}")
 
-    return JSONResponse({
-        "status": "success",
-        "message": "Book uploaded; audiobook generation started",
-        "book": _book_json(book),
-        "audiobook": _audiobook_json(audiobook),
-    })
+    job = ConversionJob(
+        job_id=job_id,
+        file_name=original_name,
+        file_type=suffix.lstrip("."),
+        title=Path(original_name).stem,
+        voice=voice or DEFAULT_VOICE,
+        speed=speed,
+        work_dir=work_dir,
+        mp3_path=mp3_path,
+        text_path=text_path,
+        cover_path=cover_path,
+        has_cover=bool(has_cover and cover_path.is_file()),
+    )
+    with _jobs_lock:
+        _jobs[job_id] = job
+        snapshot = job.to_dict()
+
+    executor.submit(_process_conversion_job, job_id, source_path)
+    return JSONResponse(snapshot)
 
 
-@app.get("/audiobook-status/book/{book_id}")
-def audiobook_status(book_id: int, db: Session = Depends(get_db)):
-    book = BookService.get_book(db, book_id)
-    if not book:
-        raise HTTPException(404, "Book not found")
-    return {"book": _book_json(book), "audiobook": _audiobook_json(AudioBookService.get_audiobook_by_book_id(db, book_id))}
+@app.get("/jobs/{job_id}/status")
+def get_job_status(job_id: str):
+    job = _get_job(job_id)
+    if not job:
+        raise HTTPException(404, "Conversion job not found")
+    return job.to_dict()
 
 
-@app.post("/books/{book_id}/regenerate")
-def regenerate(book_id: int, speed: float = Form(DEFAULT_SPEED), voice: str = Form(DEFAULT_VOICE),
-               db: Session = Depends(get_db)):
-    """Re-run cleaning + narration (e.g. after re-training the cleaner or to change voice/speed)."""
-    book = BookService.get_book(db, book_id)
-    if not book or not book.file_path or not Path(book.file_path).is_file():
-        raise HTTPException(404, "Book or its source file not found")
-    ab = AudioBookService.get_audiobook_by_book_id(db, book_id)
-    if ab and ab.generation_status in ("pending", "processing"):
-        raise HTTPException(409, "Audiobook is already being generated")
-    return {"audiobook": _audiobook_json(_start_job(db, book, speed, voice))}
+@app.get("/jobs/{job_id}/audio")
+def download_job_audio(job_id: str):
+    job = _get_job(job_id)
+    if not job:
+        raise HTTPException(404, "Conversion job not found")
+    if job.status != "completed":
+        raise HTTPException(409, f"Audiobook is {job.status}")
+    if not job.mp3_path.is_file():
+        raise HTTPException(404, "Audiobook audio file not found")
+    return FileResponse(str(job.mp3_path), media_type="audio/mpeg", filename=f"{job_id}.mp3")
 
 
-@app.get("/stream-audiobook/book/{book_id}")
-def stream_audiobook_by_book(book_id: int, db: Session = Depends(get_db)):
-    """Streams the generated MP3 (supports HTTP Range requests for seeking)."""
-    audiobook = AudioBookService.get_audiobook_by_book_id(db=db, book_id=book_id)
-    if not audiobook:
-        raise HTTPException(404, "Audiobook not found for this book")
-    if audiobook.generation_status != "completed":
-        raise HTTPException(409, f"Audiobook is {audiobook.generation_status}")
-    audio_path = Path(audiobook.file_path or "")
-    if not audio_path.is_file():
-        raise HTTPException(404, "Audiobook file not found on server")
-    return FileResponse(str(audio_path), media_type="audio/mpeg", filename=audio_path.name)
+@app.get("/jobs/{job_id}/text", response_class=PlainTextResponse)
+def download_job_text(job_id: str):
+    job = _get_job(job_id)
+    if not job or not job.text_path.is_file():
+        raise HTTPException(404, "Cleaned text not available")
+    return PlainTextResponse(job.text_path.read_text(encoding="utf-8"))
 
 
-@app.get("/books/{book_id}/text", response_class=PlainTextResponse)
-def cleaned_text(book_id: int, db: Session = Depends(get_db)):
-    """The exact text that was read aloud (after the DNN removed page numbers, headers, ...)."""
-    ab = AudioBookService.get_audiobook_by_book_id(db, book_id)
-    path = Path(ab.text_path) if ab and ab.text_path else TEXT_DIR / f"book_{book_id}.txt"
-    if not path.is_file():
-        raise HTTPException(404, "Cleaned text not available yet")
-    return PlainTextResponse(path.read_text(encoding="utf-8"))
+@app.get("/jobs/{job_id}/cover")
+def download_job_cover(job_id: str):
+    job = _get_job(job_id)
+    if not job or not job.cover_path.is_file():
+        raise HTTPException(404, "Cover not available")
+    return FileResponse(str(job.cover_path), media_type="image/png")
 
 
-@app.get("/books/{book_id}/cover")
-def book_cover(book_id: int):
-    path = COVER_DIR / f"book_{book_id}.png"
-    if not path.is_file():
-        raise HTTPException(404, "No cover")
-    return FileResponse(str(path))
-
-
-@app.delete("/books/{book_id}/full")
-def delete_book_full(book_id: int, db: Session = Depends(get_db)):
-    """Delete a book together with its audiobook, cleaned text, cover and source file."""
-    book = BookService.get_book(db, book_id)
-    if not book:
-        raise HTTPException(404, "Book not found")
-    ab = AudioBookService.get_audiobook_by_book_id(db, book_id)
-    if ab and ab.generation_status in ("pending", "processing"):
-        raise HTTPException(409, "Audiobook is still being generated")
-    for p in [book.file_path, ab and ab.file_path, ab and ab.text_path, str(COVER_DIR / f"book_{book_id}.png")]:
-        if p:
-            Path(p).unlink(missing_ok=True)
-    if ab:
-        AudioBookService.delete_audiobook(db, ab.id)
-    BookService.delete_book(db, book_id)
+@app.delete("/jobs/{job_id}")
+def delete_job(job_id: str):
+    with _jobs_lock:
+        job = _jobs.get(job_id)
+        if not job:
+            return {"status": "not_found"}
+        if job.status in ("pending", "processing"):
+            raise HTTPException(409, "Conversion job is still in progress")
+        _jobs.pop(job_id, None)
+    shutil.rmtree(job.work_dir, ignore_errors=True)
     return {"status": "deleted"}
 
 
 @app.post("/preview-clean/")
 async def preview_clean(file: UploadFile = File(...), max_chars: int = Form(6000)):
     """Debug endpoint: see what the DNN keeps / removes without generating audio."""
-    path = await _save_upload(file)
+    suffix = Path(file.filename or "").suffix.lower()
+    path = TMP_DIR / f"preview_{uuid.uuid4().hex}{suffix}"
+    await _save_temp_upload(file, path)
     try:
         def work():
             doc = extract_document(str(path))
             return doc, get_cleaner().clean(doc)
+
         doc, result = await run_in_threadpool(work)
     except ExtractionError as exc:
         raise HTTPException(422, str(exc))
@@ -360,7 +436,9 @@ async def preview_clean(file: UploadFile = File(...), max_chars: int = Form(6000
     text = result.text
     return {
         "cleaner": "dnn" if result.used_model else "heuristic (model not trained)",
-        "title": doc.title, "author": doc.author, "pages": len(doc.pages),
+        "title": doc.title,
+        "author": doc.author,
+        "pages": len(doc.pages),
         "label_counts": result.label_counts,
         "removed_examples": result.removed_examples,
         "paragraphs": len(result.paragraphs),
@@ -370,13 +448,19 @@ async def preview_clean(file: UploadFile = File(...), max_chars: int = Form(6000
 
 
 @app.post("/generate-audiobook/")
-async def generate_audiobook(background_tasks: BackgroundTasks, file: UploadFile = File(...),
-                             speed: float = Form(DEFAULT_SPEED), voice: str = Form(DEFAULT_VOICE)):
+async def generate_audiobook(
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+    speed: float = Form(DEFAULT_SPEED),
+    voice: str = Form(DEFAULT_VOICE),
+):
     """Synchronous variant: upload and wait for the MP3 (only practical for short documents)."""
-    path = await _save_upload(file)
     job = uuid.uuid4().hex
+    suffix = Path(file.filename or "").suffix.lower()
+    path = TMP_DIR / f"{job}{suffix}"
     mp3 = TMP_DIR / f"{job}.mp3"
     txt = TMP_DIR / f"{job}.txt"
+    await _save_temp_upload(file, path)
     try:
         await run_in_threadpool(run_pipeline, path, mp3, txt, speed, voice)
     except (ExtractionError, TTSError) as exc:
@@ -385,8 +469,12 @@ async def generate_audiobook(background_tasks: BackgroundTasks, file: UploadFile
         path.unlink(missing_ok=True)
         txt.unlink(missing_ok=True)
     background_tasks.add_task(lambda: mp3.unlink(missing_ok=True))
-    return FileResponse(str(mp3), media_type="audio/mpeg", filename=f"{Path(file.filename).stem}.mp3",
-                        background=background_tasks)
+    return FileResponse(
+        str(mp3),
+        media_type="audio/mpeg",
+        filename=f"{Path(file.filename).stem}.mp3",
+        background=background_tasks,
+    )
 
 
 @app.get("/health")
@@ -394,6 +482,7 @@ def health():
     cleaner = get_cleaner()
     return {
         "status": "ok",
+        "storage_mode": "device-only",
         "cleaner": "dnn" if cleaner.available else "heuristic (run: python -m ai.train)",
         "tts_backend": TTS_BACKEND,
         "default_voice": DEFAULT_VOICE,
@@ -403,5 +492,9 @@ def health():
 
 @app.get("/")
 def read_root():
-    return {"message": "Bookshelf Audiobook API. POST a PDF/EPUB to /upload-book/ then poll "
-                       "/audiobook-status/book/{id}. Docs at /docs."}
+    return {
+        "message": (
+            "Bookshelf API (Auth DB + Ephemeral AI Narration). "
+            "Books & audio are stored locally on the client device. Docs at /docs."
+        )
+    }

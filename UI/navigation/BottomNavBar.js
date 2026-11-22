@@ -12,6 +12,7 @@ import {
   Typography,
   useHIGTheme,
 } from '../theme/hig';
+import { getInitials } from '../utils/helpers';
 
 export const TABS = [
   {
@@ -19,12 +20,6 @@ export const TABS = [
     label: 'Home',
     iconOutline: 'home-outline',
     iconFilled: 'home',
-  },
-  {
-    name: 'LibraryStack',
-    label: 'Library',
-    iconOutline: 'library-outline',
-    iconFilled: 'library',
   },
   {
     name: 'SettingsStack',
@@ -107,6 +102,8 @@ export function SidebarNav({ navigation, currentRouteName, onSelectRoute }) {
   const theme = useHIGTheme();
   const insets = useSafeAreaInsets();
   const bookCount = useAppStore((state) => state.audiobooks.length);
+  const user = useAppStore((state) => state.user);
+  const authToken = useAppStore((state) => state.authToken);
   const [browseExpanded, setBrowseExpanded] = React.useState(true);
 
   const handlePress = (routeName) => {
@@ -116,6 +113,9 @@ export function SidebarNav({ navigation, currentRouteName, onSelectRoute }) {
       navigation?.navigate(routeName);
     }
   };
+
+  const isSignedIn = Boolean(user && authToken);
+  const displayName = user?.full_name || user?.username || 'Account';
 
   return (
     <View
@@ -130,105 +130,186 @@ export function SidebarNav({ navigation, currentRouteName, onSelectRoute }) {
         },
       ]}
     >
-      <Text
-        accessibilityRole="header"
-        style={[
-          Typography.title2,
-          {
-            color: theme.colors.labelPrimary,
-            paddingHorizontal: Spacing.md,
-            marginBottom: Spacing.lg,
-          },
-        ]}
-      >
-        Bookshelf
-      </Text>
-
-      <PressableScale
-        onPress={() => setBrowseExpanded((prev) => !prev)}
-        accessibilityRole="button"
-        accessibilityLabel="Browse section"
-        accessibilityState={{ expanded: browseExpanded }}
-        style={styles.sectionToggle}
-      >
+      <View style={styles.sidebarTop}>
         <Text
+          accessibilityRole="header"
           style={[
-            Typography.footnote,
+            Typography.title2,
             {
-              fontWeight: '600',
-              color: theme.colors.labelSecondary,
-              letterSpacing: 0.3,
+              color: theme.colors.labelPrimary,
+              paddingHorizontal: Spacing.md,
+              marginBottom: Spacing.lg,
             },
           ]}
         >
-          Browse
+          Bookshelf
         </Text>
-        <Ionicons
-          name={browseExpanded ? 'chevron-down' : 'chevron-forward'}
-          size={16}
-          color={theme.colors.labelSecondary}
-        />
-      </PressableScale>
 
-      {browseExpanded && (
-        <View style={styles.sidebarList}>
-          {TABS.map((tab) => {
-            const isActive = currentRouteName === tab.name;
-            const iconColor = isActive ? theme.colors.accent : theme.colors.labelSecondary;
-            const textColor = isActive ? theme.colors.accent : theme.colors.labelPrimary;
+        <PressableScale
+          onPress={() => setBrowseExpanded((prev) => !prev)}
+          accessibilityRole="button"
+          accessibilityLabel="Browse section"
+          accessibilityState={{ expanded: browseExpanded }}
+          style={styles.sectionToggle}
+        >
+          <Text
+            style={[
+              Typography.footnote,
+              {
+                fontWeight: '600',
+                color: theme.colors.labelSecondary,
+                letterSpacing: 0.3,
+              },
+            ]}
+          >
+            Browse
+          </Text>
+          <Ionicons
+            name={browseExpanded ? 'chevron-down' : 'chevron-forward'}
+            size={16}
+            color={theme.colors.labelSecondary}
+          />
+        </PressableScale>
 
-            return (
-              <PressableScale
-                key={tab.name}
-                onPress={() => handlePress(tab.name)}
-                accessibilityRole="tab"
-                accessibilityLabel={tab.label}
-                accessibilityState={{ selected: isActive }}
-                style={[
-                  styles.sidebarItem,
-                  continuousCurve,
-                  {
-                    backgroundColor: isActive ? theme.colors.accentTint : 'transparent',
-                  },
-                ]}
-              >
-                <Ionicons
-                  name={isActive ? tab.iconFilled : tab.iconOutline}
-                  size={20}
-                  color={iconColor}
-                />
-                <Text
+        {browseExpanded && (
+          <View style={styles.sidebarList}>
+            {TABS.map((tab) => {
+              const isActive = currentRouteName === tab.name;
+              const iconColor = isActive ? theme.colors.accent : theme.colors.labelSecondary;
+              const textColor = isActive ? theme.colors.accent : theme.colors.labelPrimary;
+
+              return (
+                <PressableScale
+                  key={tab.name}
+                  onPress={() => handlePress(tab.name)}
+                  accessibilityRole="tab"
+                  accessibilityLabel={tab.label}
+                  accessibilityState={{ selected: isActive }}
                   style={[
-                    Typography.subheadline,
+                    styles.sidebarItem,
+                    continuousCurve,
                     {
-                      flex: 1,
-                      fontWeight: isActive ? '600' : '500',
-                      color: textColor,
+                      backgroundColor: isActive ? theme.colors.accentTint : 'transparent',
                     },
                   ]}
-                  numberOfLines={1}
                 >
-                  {tab.label}
-                </Text>
-                {tab.name === 'LibraryStack' && bookCount > 0 && (
+                  <Ionicons
+                    name={isActive ? tab.iconFilled : tab.iconOutline}
+                    size={20}
+                    color={iconColor}
+                  />
                   <Text
                     style={[
-                      Typography.footnote,
-                      Typography.tabularNums,
+                      Typography.subheadline,
                       {
-                        fontWeight: '600',
-                        color: isActive ? theme.colors.accent : theme.colors.labelSecondary,
+                        flex: 1,
+                        fontWeight: isActive ? '600' : '500',
+                        color: textColor,
                       },
                     ]}
+                    numberOfLines={1}
                   >
-                    {bookCount}
+                    {tab.label}
                   </Text>
-                )}
-              </PressableScale>
-            );
-          })}
-        </View>
-      )}
+                  {tab.name === 'HomeStack' && bookCount > 0 && (
+                    <Text
+                      style={[
+                        Typography.footnote,
+                        Typography.tabularNums,
+                        {
+                          fontWeight: '600',
+                          color: isActive ? theme.colors.accent : theme.colors.labelSecondary,
+                        },
+                      ]}
+                    >
+                      {bookCount}
+                    </Text>
+                  )}
+                </PressableScale>
+              );
+            })}
+          </View>
+        )}
+      </View>
+
+      <View style={[styles.accountFooter, { borderTopColor: theme.colors.separator }]}>
+        {isSignedIn ? (
+          <PressableScale
+            onPress={() => handlePress('SettingsStack')}
+            accessibilityLabel={`Account ${displayName}, open settings`}
+            style={[styles.accountButton, continuousCurve]}
+          >
+            <View
+              style={[
+                styles.avatarCircle,
+                { backgroundColor: theme.colors.accentTint },
+              ]}
+            >
+              <Text
+                style={[
+                  Typography.footnote,
+                  { fontWeight: '700', color: theme.colors.accent },
+                ]}
+              >
+                {getInitials(user)}
+              </Text>
+            </View>
+            <View style={styles.accountMeta}>
+              <Text
+                numberOfLines={1}
+                style={[
+                  Typography.subheadline,
+                  { fontWeight: '600', color: theme.colors.labelPrimary },
+                ]}
+              >
+                {displayName}
+              </Text>
+              <Text
+                numberOfLines={1}
+                style={[Typography.caption, { color: theme.colors.labelSecondary }]}
+              >
+                {user.email}
+              </Text>
+            </View>
+          </PressableScale>
+        ) : (
+          <PressableScale
+            onPress={() => navigation?.navigate('Auth', { initialMode: 'login' })}
+            accessibilityLabel="Sign in (optional account)"
+            style={[styles.accountButton, continuousCurve]}
+          >
+            <View
+              style={[
+                styles.avatarCircle,
+                { backgroundColor: theme.colors.surfaceInset },
+              ]}
+            >
+              <Ionicons
+                name="person-outline"
+                size={18}
+                color={theme.colors.accent}
+              />
+            </View>
+            <View style={styles.accountMeta}>
+              <Text
+                numberOfLines={1}
+                style={[
+                  Typography.subheadline,
+                  { fontWeight: '600', color: theme.colors.accent },
+                ]}
+              >
+                Sign In
+              </Text>
+              <Text
+                numberOfLines={1}
+                style={[Typography.caption, { color: theme.colors.labelSecondary }]}
+              >
+                Optional account
+              </Text>
+            </View>
+          </PressableScale>
+        )}
+      </View>
     </View>
   );
 }
@@ -260,6 +341,10 @@ const styles = StyleSheet.create({
     width: 260,
     borderRightWidth: StyleSheet.hairlineWidth,
     paddingHorizontal: Spacing.md,
+    justifyContent: 'space-between',
+  },
+  sidebarTop: {
+    flex: 1,
   },
   sectionToggle: {
     minHeight: 44,
@@ -278,5 +363,29 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: Spacing.md,
+  },
+  accountFooter: {
+    borderTopWidth: StyleSheet.hairlineWidth,
+    paddingTop: Spacing.sm,
+  },
+  accountButton: {
+    minHeight: 52,
+    paddingHorizontal: Spacing.sm,
+    paddingVertical: Spacing.xs,
+    borderRadius: Radii.pillItem,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.md,
+  },
+  avatarCircle: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  accountMeta: {
+    flex: 1,
+    gap: 2,
   },
 });

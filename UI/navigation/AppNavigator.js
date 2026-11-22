@@ -1,5 +1,5 @@
-import React, { useMemo } from 'react';
-import { Platform, StyleSheet, View, useWindowDimensions } from 'react-native';
+import React, { useEffect, useMemo } from 'react';
+import { ActivityIndicator, Platform, StyleSheet, View, useWindowDimensions } from 'react-native';
 import {
   createNavigatorFactory,
   TabActions,
@@ -8,13 +8,15 @@ import {
 } from '@react-navigation/native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import HomeScreen from '../screens/HomeScreen';
-import LibraryScreen from '../screens/LibraryScreen';
-import SettingsScreen from '../screens/SettingsScreen';
 import AudioPlayerScreen from '../screens/AudioPlayerScreen';
+import AuthScreen from '../screens/AuthScreen';
+import HomeScreen from '../screens/HomeScreen';
+import SettingsScreen from '../screens/SettingsScreen';
+import ApiService from '../services/ApiService';
+import useAppStore from '../store/UseAppStore';
+import { getLayoutMetrics, useHIGTheme } from '../theme/hig';
 import BottomNavBar, { SidebarNav } from './BottomNavBar';
 import { NavigationLayoutContext } from './NavigationLayoutContext';
-import { getLayoutMetrics, useHIGTheme } from '../theme/hig';
 
 function AdaptiveTabNavigatorView({ initialRouteName, backBehavior, children, screenOptions }) {
   const theme = useHIGTheme();
@@ -63,7 +65,7 @@ function AdaptiveTabNavigatorView({ initialRouteName, backBehavior, children, sc
     }
   };
 
-  // Keep all tab screens mounted so background upload/polling in LibraryScreen stays active when switching tabs.
+  // Keep all tab screens mounted so UI state stays intact when switching tabs.
   const scenes = (
     <View style={styles.sceneContainer}>
       {state.routes.map((route, index) => {
@@ -129,13 +131,54 @@ function MainTabsScreen() {
   return (
     <Tab.Navigator initialRouteName="HomeStack">
       <Tab.Screen name="HomeStack" component={HomeScreen} options={{ title: 'Home' }} />
-      <Tab.Screen name="LibraryStack" component={LibraryScreen} options={{ title: 'Library' }} />
       <Tab.Screen name="SettingsStack" component={SettingsScreen} options={{ title: 'Settings' }} />
     </Tab.Navigator>
   );
 }
 
 export default function AppNavigator() {
+  const theme = useHIGTheme();
+  const authToken = useAppStore((state) => state.authToken);
+  const hasHydrated = useAppStore((state) => state.hasHydrated);
+  const serverUrl = useAppStore((state) => state.serverUrl);
+  const setAuthSession = useAppStore((state) => state.setAuthSession);
+  const clearAuthSession = useAppStore((state) => state.clearAuthSession);
+
+  useEffect(() => {
+    if (!hasHydrated || !authToken) return;
+    let active = true;
+
+    ApiService.getMe(serverUrl)
+      .then((freshUser) => {
+        if (active && freshUser) {
+          setAuthSession(freshUser, authToken);
+        }
+      })
+      .catch((err) => {
+        // Only invalidate session on explicit auth rejection; keep offline playback working.
+        if (active && (err?.status === 401 || err?.status === 403)) {
+          clearAuthSession();
+        }
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [hasHydrated, authToken, serverUrl]);
+
+  if (!hasHydrated) {
+    return (
+      <View
+        style={[
+          styles.loadingCanvas,
+          { backgroundColor: theme.colors.surfaceGroupedCanvas },
+        ]}
+      >
+        <ActivityIndicator size="large" color={theme.colors.accent} />
+      </View>
+    );
+  }
+
   return (
     <RootStack.Navigator screenOptions={{ headerShown: false }}>
       <RootStack.Screen name="MainTabs" component={MainTabsScreen} />
@@ -149,11 +192,26 @@ export default function AppNavigator() {
           gestureEnabled: true,
         }}
       />
+      <RootStack.Screen
+        name="Auth"
+        component={AuthScreen}
+        options={{
+          headerShown: false,
+          presentation: Platform.OS === 'web' ? 'transparentModal' : 'modal',
+          animation: 'slide_from_bottom',
+          gestureEnabled: true,
+        }}
+      />
     </RootStack.Navigator>
   );
 }
 
 const styles = StyleSheet.create({
+  loadingCanvas: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
   shell: {
     flex: 1,
   },

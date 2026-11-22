@@ -35,3 +35,32 @@ export function formatDuration(seconds) {
   }
   return `${minutes}m`;
 }
+
+/**
+ * Format byte size into compact human-readable storage readout.
+ */
+export function formatBytes(bytes) {
+  const num = Number(bytes);
+  if (!Number.isFinite(num) || num <= 0) return '0 B';
+  if (num < 1024) return `${Math.round(num)} B`;
+  const units = ['KB', 'MB', 'GB', 'TB'];
+  let value = num / 1024;
+  let idx = 0;
+  while (value >= 1024 && idx < units.length - 1) {
+    value /= 1024;
+    idx += 1;
+  }
+  return `${value >= 10 || idx === 0 ? value.toFixed(0) : value.toFixed(1)} ${units[idx]}`;
+}
+
+/**
+ * Derive up to two uppercase initials from a user's display name, username, or email.
+ */
+export function getInitials(user) {
+  const source = (user?.full_name || user?.username || user?.email || 'U').trim();
+  const parts = source.split(/\s+/).filter(Boolean);
+  if (parts.length >= 2) {
+    return `${parts[0][0]}${parts[1][0]}`.toUpperCase();
+  }
+  return source.slice(0, 2).toUpperCase();
+}

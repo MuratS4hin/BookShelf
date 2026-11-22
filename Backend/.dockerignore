@@ -1,0 +1,25 @@
+# Virtual environments & Python caches
+venv/
+venv_broken_old/
+__pycache__/
+**/__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Secrets & local env files (injected at runtime via docker-compose)
+.env
+.env.*
+
+# Runtime / persistent data (mounted as Docker volumes)
+storage/
+voices/
+temp_processing/
+ai/data/
+
+# Unused / OS / Docker files
+.DS_Store
+.git/
+commands.txt
+en_US-lessac-medium.onnx.json
+Dockerfile
+.dockerignore

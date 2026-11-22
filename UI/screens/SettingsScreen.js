@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Alert, Platform, StyleSheet, Text, TextInput, View } from 'react-native';
+import { Alert, StyleSheet, Text, TextInput, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import HIGButton from '../components/hig/HIGButton';
 import { HIGGroupedRow, HIGGroupedSection } from '../components/hig/HIGGroupedSection';
@@ -7,6 +7,7 @@ import HIGScreen from '../components/hig/HIGScreen';
 import HIGSegmentedControl from '../components/hig/HIGSegmentedControl';
 import PressableScale from '../components/hig/PressableScale';
 import ApiService from '../services/ApiService';
+import LocalLibraryStorage from '../services/LocalLibraryStorage';
 import useAppStore from '../store/UseAppStore';
 import {
   continuousCurve,
@@ -17,7 +18,7 @@ import {
   useHIGTheme,
   webInputResetStyle,
 } from '../theme/hig';
-import { confirmAction } from '../utils/helpers';
+import { confirmAction, formatBytes, getInitials } from '../utils/helpers';
 
 const THEME_OPTIONS = [
   { value: 'system', label: 'System' },
@@ -32,9 +33,12 @@ const SPEED_OPTIONS = [
   { value: 1.5, label: '1.5x' },
 ];
 
-export default function SettingsScreen() {
+export default function SettingsScreen({ navigation }) {
   const theme = useHIGTheme();
 
+  const user = useAppStore((state) => state.user);
+  const authToken = useAppStore((state) => state.authToken);
+  const clearAuthSession = useAppStore((state) => state.clearAuthSession);
   const serverUrl = useAppStore((state) => state.serverUrl);
   const setServerUrl = useAppStore((state) => state.setServerUrl);
   const themePreference = useAppStore((state) => state.themePreference);
@@ -49,6 +53,8 @@ export default function SettingsScreen() {
   const [connectionState, setConnectionState] = useState('idle'); // 'idle' | 'testing' | 'connected' | 'error'
   const [healthInfo, setHealthInfo] = useState(null);
   const [errorMessage, setErrorMessage] = useState('');
+
+  const isSignedIn = Boolean(user && authToken);
 
   const handleSaveAndTestServer = async () => {
     const cleaned = (urlInput || 'http://localhost:5002').trim().replace(/\/+$/, '');
@@ -78,11 +84,23 @@ export default function SettingsScreen() {
     }
   };
 
+  const handleSignOut = () => {
+    confirmAction(
+      'Sign Out',
+      'Sign out of your account? Books and audio saved on this device will remain available.',
+      clearAuthSession,
+      'Sign Out'
+    );
+  };
+
   const handleClearShelf = () => {
     confirmAction(
-      'Clear Local Shelf',
-      'Remove all saved books from this device? Files stored on the backend server will remain untouched.',
-      clearAudiobooks,
+      'Clear On-Device Library',
+      'Delete all saved books, covers, and MP3 audiobooks from this device?',
+      async () => {
+        await LocalLibraryStorage.clearAllBookFiles().catch(() => {});
+        clearAudiobooks();
+      },
       'Clear'
     );
   };
@@ -103,9 +121,127 @@ export default function SettingsScreen() {
       ? 'Testing connection…'
       : 'Not tested yet';
 
+  const totalStorageBytes = LocalLibraryStorage.getTotalStorageBytes(audiobooks);
+  const displayName = user?.full_name || user?.username || 'Signed In';
+
   return (
     <HIGScreen title="Settings">
       <View style={styles.sectionsStack}>
+        <HIGGroupedSection
+          title="Account"
+          footer="Account sign-in is optional. Database connection is used only for login and sign-up."
+        >
+          {isSignedIn ? (
+            <>
+              <HIGGroupedRow showDivider dividerInset={72}>
+                <View style={styles.accountRow}>
+                  <View
+                    style={[
+                      styles.avatarCircle,
+                      { backgroundColor: theme.colors.accentTint },
+                    ]}
+                  >
+                    <Text
+                      style={[
+                        Typography.headline,
+                        { color: theme.colors.accent },
+                      ]}
+                    >
+                      {getInitials(user)}
+                    </Text>
+                  </View>
+                  <View style={styles.accountMeta}>
+                    <Text
+                      numberOfLines={1}
+                      style={[Typography.headline, { color: theme.colors.labelPrimary }]}
+                    >
+                      {displayName}
+                    </Text>
+                    <Text
+                      numberOfLines={1}
+                      style={[Typography.footnote, { color: theme.colors.labelSecondary }]}
+                    >
+                      {user?.email || ''}
+                      {user?.username ? ` · @${user.username}` : ''}
+                    </Text>
+                  </View>
+                </View>
+              </HIGGroupedRow>
+
+              <HIGGroupedRow showDivider={false}>
+                <PressableScale
+                  onPress={handleSignOut}
+                  accessibilityLabel="Sign out"
+                  style={styles.destructiveRow}
+                >
+                  <Text style={[Typography.body, { color: theme.colors.destructive }]}>
+                    Sign Out
+                  </Text>
+                </PressableScale>
+              </HIGGroupedRow>
+            </>
+          ) : (
+            <>
+              <HIGGroupedRow showDivider dividerInset={72}>
+                <PressableScale
+                  onPress={() => navigation.navigate('Auth', { initialMode: 'login' })}
+                  accessibilityLabel="Sign in"
+                  style={styles.accountRow}
+                >
+                  <View
+                    style={[
+                      styles.avatarCircle,
+                      { backgroundColor: theme.colors.accentTint },
+                    ]}
+                  >
+                    <Ionicons
+                      name="person-outline"
+                      size={22}
+                      color={theme.colors.accent}
+                    />
+                  </View>
+                  <View style={styles.accountMeta}>
+                    <Text
+                      numberOfLines={1}
+                      style={[Typography.headline, { color: theme.colors.accent }]}
+                    >
+                      Sign In
+                    </Text>
+                    <Text
+                      numberOfLines={1}
+                      style={[Typography.footnote, { color: theme.colors.labelSecondary }]}
+                    >
+                      Optional account · Books stay on this device
+                    </Text>
+                  </View>
+                  <Ionicons
+                    name="chevron-forward"
+                    size={18}
+                    color={theme.colors.labelTertiary}
+                  />
+                </PressableScale>
+              </HIGGroupedRow>
+
+              <HIGGroupedRow showDivider={false}>
+                <PressableScale
+                  onPress={() => navigation.navigate('Auth', { initialMode: 'signup' })}
+                  accessibilityLabel="Create account"
+                  style={styles.navigationRow}
+                >
+                  <Text style={[Typography.body, { color: theme.colors.accent }]}>
+                    Create Account
+                  </Text>
+                  <Ionicons
+                    name="chevron-forward"
+                    size={18}
+                    color={theme.colors.labelTertiary}
+                  />
+                </PressableScale>
+              </HIGGroupedRow>
+            </>
+          )}
+        </HIGGroupedSection>
+
         <HIGGroupedSection
           title="Appearance"
           footer="System automatically matches your device's Light or Dark mode."
@@ -172,7 +308,7 @@ export default function SettingsScreen() {
         <View>
           <HIGGroupedSection
             title="AI Backend Server"
-            footer="Use http://localhost:5002 on simulator or web, or your computer's LAN IP on a phone."
+            footer="Used for account sign-in and temporary AI narration. Books and audio are saved directly on this device."
           >
             <HIGGroupedRow showDivider dividerInset={16}>
               <View style={styles.inputRow}>
@@ -246,25 +382,24 @@ export default function SettingsScreen() {
           />
         </View>
 
-        <HIGGroupedSection title="About">
+        <HIGGroupedSection title="On-Device Storage & About">
           <HIGGroupedRow showDivider dividerInset={16}>
             <View style={styles.keyValueRow}>
               <Text style={[Typography.body, { color: theme.colors.labelPrimary }]}>
-                Version
+                Storage
               </Text>
               <Text
                 style={[
                   Typography.body,
-                  Typography.tabularNums,
                   { color: theme.colors.labelSecondary },
                 ]}
               >
-                1.0.0
+                On This Device
               </Text>
             </View>
           </HIGGroupedRow>
 
-          <HIGGroupedRow showDivider={audiobooks.length > 0} dividerInset={16}>
+          <HIGGroupedRow showDivider dividerInset={16}>
             <View style={styles.keyValueRow}>
               <Text style={[Typography.body, { color: theme.colors.labelPrimary }]}>
                 Saved Books
@@ -281,17 +416,51 @@ export default function SettingsScreen() {
             </View>
           </HIGGroupedRow>
 
+          <HIGGroupedRow showDivider dividerInset={16}>
+            <View style={styles.keyValueRow}>
+              <Text style={[Typography.body, { color: theme.colors.labelPrimary }]}>
+                Device Space Used
+              </Text>
+              <Text
+                style={[
+                  Typography.body,
+                  Typography.tabularNums,
+                  { color: theme.colors.labelSecondary },
+                ]}
+              >
+                {formatBytes(totalStorageBytes)}
+              </Text>
+            </View>
+          </HIGGroupedRow>
+
+          <HIGGroupedRow showDivider={audiobooks.length > 0} dividerInset={16}>
+            <View style={styles.keyValueRow}>
+              <Text style={[Typography.body, { color: theme.colors.labelPrimary }]}>
+                Version
+              </Text>
+              <Text
+                style={[
+                  Typography.body,
+                  Typography.tabularNums,
+                  { color: theme.colors.labelSecondary },
+                ]}
+              >
+                1.0.0
+              </Text>
+            </View>
+          </HIGGroupedRow>
+
           {audiobooks.length > 0 && (
             <HIGGroupedRow showDivider={false}>
               <PressableScale
                 onPress={handleClearShelf}
-                accessibilityLabel="Clear local shelf"
+                accessibilityLabel="Clear on-device library"
                 style={styles.destructiveRow}
               >
                 <Text
                   style={[Typography.body, { color: theme.colors.destructive }]}
                 >
-                  Clear Local Shelf
+                  Clear On-Device Library
                 </Text>
               </PressableScale>
             </HIGGroupedRow>
@@ -305,6 +474,32 @@ export default function SettingsScreen() {
 const styles = StyleSheet.create({
   sectionsStack: {
     gap: Spacing.xl,
+  },
+  accountRow: {
+    minHeight: 68,
+    paddingHorizontal: Spacing.base,
+    paddingVertical: Spacing.md,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.md,
+  },
+  avatarCircle: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  accountMeta: {
+    flex: 1,
+    gap: 2,
+  },
+  navigationRow: {
+    minHeight: 48,
+    paddingHorizontal: Spacing.base,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
   },
   controlBlock: {
     padding: Spacing.base,
